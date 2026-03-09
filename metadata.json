@@ -1,0 +1,5 @@
+{
+  "name": "SeeC",
+  "description": "A node-based visual programming environment for generating C code. Drag, drop, and connect logic blocks to build C programs.",
+  "requestFramePermissions": []
+}
