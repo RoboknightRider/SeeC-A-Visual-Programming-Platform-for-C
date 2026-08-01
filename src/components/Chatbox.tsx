@@ -1,8 +1,11 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { MessageSquare, X, Send, Loader2, Copy, Check } from 'lucide-react';
+import { MessageSquare, X, Send, Loader2, Copy, Check, Cpu, Globe } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { cn } from '../lib/utils'; 
-import { askGemini } from '../services/gemini';
+import { askAI, type AIProvider as GeminiAIProvider } from '../services/gemini';
+
+// Fallback type definition to ensure no TypeScript compilation issues
+type AIProvider = GeminiAIProvider | 'gemini' | 'local';
 
 interface Message {
   id: string;
@@ -35,6 +38,10 @@ export const Chatbox: React.FC<ChatboxProps> = ({
   const [chatInput, setChatInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
+  
+  // Track active AI provider choice
+  const [aiProvider, setAiProvider] = useState<AIProvider>('gemini');
+
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -99,7 +106,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     setChatInput('');
     setIsLoading(true);
 
-    const aiResponseText = await askGemini(userText, nextMessages);
+    const aiResponseText = await askAI(userText, nextMessages, aiProvider);
 
     const aiReply: Message = {
       id: (Date.now() + 1).toString(),
@@ -109,7 +116,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     
     setMessages(prev => [...prev, aiReply]);
     setIsLoading(false);
-  }, [chatInput, isLoading, messages]);
+  }, [chatInput, isLoading, messages, aiProvider]);
 
   const handleAutoSendError = useCallback(async (errorText: string) => {
     setIsLoading(true);
@@ -123,7 +130,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     const nextMessages = [...messages, userMessage];
     setMessages(nextMessages);
 
-    const aiResponseText = await askGemini(userMessage.text, nextMessages);
+    const aiResponseText = await askAI(userMessage.text, nextMessages, aiProvider);
 
     const aiReply: Message = {
       id: (Date.now() + 1).toString(),
@@ -133,7 +140,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
 
     setMessages(prev => [...prev, aiReply]);
     setIsLoading(false);
-  }, [messages]);
+  }, [messages, aiProvider]);
 
   useEffect(() => {
     if (initialError && initialError.trim() !== "" && showChat && !isLoading) {
@@ -148,23 +155,70 @@ export const Chatbox: React.FC<ChatboxProps> = ({
   if (!showChat) return null;
 
   return (
-    <div className="fixed right-3 bottom-3 w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(42rem,calc(100dvh-1.5rem))] h-[min(28rem,calc(100dvh-1.5rem))] bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl z-[999] flex flex-col overflow-hidden">
-      {/* Header */}
-      <div className="p-4 border-b border-zinc-800 bg-zinc-900 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <MessageSquare className="text-blue-500 w-5 h-5" />
-          <h3 className="text-sm font-bold text-white">SeeC AI Assistant</h3>
+    <div className="fixed right-3 bottom-3 w-[min(26rem,calc(100vw-1.5rem))] max-h-[min(42rem,calc(100dvh-1.5rem))] h-[min(28rem,calc(100dvh-1.5rem))] bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl z-[999] flex flex-col overflow-hidden">
+      
+      {/* Header with Side-by-Side Radio Switcher */}
+      <div className="p-3 border-b border-zinc-800 bg-zinc-900 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 shrink-0">
+          <MessageSquare className="text-blue-500 w-4 h-4" />
+          <h3 className="text-xs font-bold text-white hidden sm:block">SeeC AI</h3>
         </div>
+
+        {/* Side-by-Side Radio Option */}
+        <div className="flex items-center bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-[11px]">
+          {/* Gemini Radio */}
+          <label
+            className={cn(
+              "flex items-center gap-1 px-2.5 py-1 rounded-md cursor-pointer transition-all select-none",
+              aiProvider === 'gemini'
+                ? "bg-zinc-800 text-white font-medium shadow-sm"
+                : "text-zinc-400 hover:text-zinc-200"
+            )}
+          >
+            <input
+              type="radio"
+              name="aiProvider"
+              value="gemini"
+              checked={aiProvider === 'gemini'}
+              onChange={() => setAiProvider('gemini')}
+              className="sr-only"
+            />
+            <Globe className="w-3 h-3 text-emerald-400 shrink-0" />
+            <span>Gemini</span>
+          </label>
+
+          {/* Local AI Radio */}
+          <label
+            className={cn(
+              "flex items-center gap-1 px-2.5 py-1 rounded-md cursor-pointer transition-all select-none",
+              aiProvider === 'local'
+                ? "bg-zinc-800 text-white font-medium shadow-sm"
+                : "text-zinc-400 hover:text-zinc-200"
+            )}
+          >
+            <input
+              type="radio"
+              name="aiProvider"
+              value="local"
+              checked={aiProvider === 'local'}
+              onChange={() => setAiProvider('local')}
+              className="sr-only"
+            />
+            <Cpu className="w-3 h-3 text-amber-400 shrink-0" />
+            <span>Local AI</span>
+          </label>
+        </div>
+
         <button 
           type="button"
           onClick={() => setShowChat(false)} 
-          className="p-1.5 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors border border-zinc-800 bg-zinc-950"
+          className="p-1.5 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors border border-zinc-800 bg-zinc-950 shrink-0"
         >
           <X size={14} />
         </button>
       </div>
 
-      {/* Messages */}
+      {/* Messages Feed */}
       <div className="flex-1 p-4 overflow-y-auto space-y-4 bg-black/10 font-sans text-xs flex flex-col">
         {messages.map((msg) => {
           const segments = msg.sender === 'ai' ? parseMessageSegments(msg.text) : [];
@@ -213,10 +267,10 @@ export const Chatbox: React.FC<ChatboxProps> = ({
                         key={`${msg.id}-text-${index}`}
                         className={cn(
                           "prose prose-invert max-w-none text-xs space-y-1.5",
-                          "[_&strong]:font-bold [&_strong]:text-white",
-                          "[_&ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4",
-                          "[_&code]:bg-zinc-950 [_&code]:px-1.5 [_&code]:py-0.5 [_&code]:rounded [_&code]:font-mono [_&code]:text-[11px]",
-                          "[_&pre]:bg-zinc-950 [_&pre]:p-2 [_&pre]:rounded-md [_&pre]:my-2 [_&pre]:overflow-x-auto [_&pre_code]:bg-transparent [_&pre_code]:p-0"
+                          "[&_strong]:font-bold [&_strong]:text-white",
+                          "[&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4",
+                          "[&_code]:bg-zinc-950 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-[11px]",
+                          "[&_pre]:bg-zinc-950 [&_pre]:p-2 [&_pre]:rounded-md [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0"
                         )}
                       >
                         <ReactMarkdown>
@@ -230,10 +284,10 @@ export const Chatbox: React.FC<ChatboxProps> = ({
                 <div
                   className={cn(
                     "prose prose-invert max-w-none text-xs space-y-1.5",
-                    "[_&strong]:font-bold [&_strong]:text-white",
-                    "[_&ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4",
-                    "[_&code]:bg-zinc-950 [_&code]:px-1.5 [_&code]:py-0.5 [_&code]:rounded [_&code]:font-mono [_&code]:text-[11px]",
-                    "[_&pre]:bg-zinc-950 [_&pre]:p-2 [_&pre]:rounded-md [_&pre]:my-2 [_&pre]:overflow-x-auto [_&pre_code]:bg-transparent [_&pre_code]:p-0"
+                    "[&_strong]:font-bold [&_strong]:text-white",
+                    "[&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4",
+                    "[&_code]:bg-zinc-950 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-[11px]",
+                    "[&_pre]:bg-zinc-950 [&_pre]:p-2 [&_pre]:rounded-md [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0"
                   )}
                 >
                   <ReactMarkdown>
@@ -264,7 +318,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
             if (e.key === 'Enter') handleSendMessage();
           }}
           disabled={isLoading}
-          placeholder={isLoading ? "Thinking..." : "Ask a question..."} 
+          placeholder={isLoading ? "Thinking..." : `Ask ${aiProvider === 'local' ? 'Local AI' : 'Gemini'}...`} 
           className="flex-1 bg-black/40 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
         />
         <button

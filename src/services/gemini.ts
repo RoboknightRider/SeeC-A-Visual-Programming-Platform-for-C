@@ -1,3 +1,8 @@
+// src/services/gemini.ts
+import { askLocalAI } from './localAi';
+
+export type AIProvider = 'gemini' | 'local';
+
 const SYSTEM_INSTRUCTION = `
 You are an expert, friendly computer science tutor integrated into a visual web application. Your purpose is to explain C programming concepts and guide users.
 
@@ -6,6 +11,7 @@ CRITICAL FORMATTING & LENGTH RULES:
 2. Write exactly one or two conversational sentences explaining what the error is and how to fix it.
 3. Use a casual, direct tone—like a helpful peer speaking to a friend.
 4. Keep the response under 30 words total.
+5. NEVER output prompt labels like "User:", "Assistant:", "Error Type:", or "Explanation:".
 
 When the user encounters a terminal/compilation error, you must follow this exact structural template:
 1. State the exact error clearly in a short sentence.
@@ -17,13 +23,18 @@ General Rules:
 - If the user asks about anything outside C programming or computer science, politely and briefly redirect them back to learning C.
 `;
 
-export async function askGemini(prompt: string, messages: Array<{ sender: 'user' | 'ai'; text: string }> = []): Promise<string> {
+/**
+ * Calls Gemini API.
+ * Automatically falls back to Local AI if Gemini fails or user goes offline.
+ */
+export async function askGemini(
+  prompt: string, 
+  messages: Array<{ sender: 'user' | 'ai'; text: string }> = []
+): Promise<string> {
   try {
     const response = await fetch('/api/gemini', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         prompt,
         messages,
@@ -31,15 +42,33 @@ export async function askGemini(prompt: string, messages: Array<{ sender: 'user'
       }),
     });
 
-    const data = await response.json() as { text?: string; error?: string };
+    const data = (await response.json()) as { text?: string; error?: string };
 
     if (!response.ok) {
-      return data.error || 'Error connecting to Gemini API. Please check your server configuration.';
+      console.warn('Gemini API error response. Falling back to local AI...');
+      return await askLocalAI(prompt, messages);
     }
 
     return data.text || 'No response received.';
   } catch (error) {
-    console.error('Gemini API Error:', error);
-    return 'Error connecting to Gemini API. Please check your server configuration.';
+    console.warn('Gemini network error. Falling back to local AI...', error);
+    return await askLocalAI(prompt, messages);
   }
+}
+
+/**
+ * Unified entry point that explicitly respects the radio button selection:
+ * - 'local'  -> directly calls askLocalAI (works offline & online)
+ * - 'gemini' -> calls askGemini (with fallback if network drops)
+ */
+export async function askAI(
+  prompt: string,
+  messages: Array<{ sender: 'user' | 'ai'; text: string }> = [],
+  provider: AIProvider = 'gemini'
+): Promise<string> {
+  if (provider === 'local') {
+    return await askLocalAI(prompt, messages);
+  }
+  
+  return await askGemini(prompt, messages);
 }

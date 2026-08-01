@@ -7,8 +7,48 @@ import { spawn, execSync, ChildProcess } from "child_process";
 import fs from "fs";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI } from "@google/genai";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// ===== Local AI (llama-server) Process Reference =====
+let llamaServerProcess: ChildProcess | null = null;
+
+function startLlamaServer() {
+  const llamaExecutable = path.join(process.cwd(), "bin", "llama-server.exe");
+  const modelPath = path.join(process.cwd(), "models", "seec-tutor.gguf");
+
+  if (!fs.existsSync(llamaExecutable)) {
+    console.warn(`[Local AI] llama-server.exe not found at ${llamaExecutable}. Local AI fallback will be disabled.`);
+    return;
+  }
+
+  if (!fs.existsSync(modelPath)) {
+    console.warn(`[Local AI] Model weights not found at ${modelPath}. Local AI fallback will be disabled.`);
+    return;
+  }
+
+  console.log("[Local AI] Booting llama-server.exe...");
+  llamaServerProcess = spawn(llamaExecutable, [
+    "-m", modelPath,
+    "--port", "8080",
+    "-c", "2048",
+    "--threads", "4"
+  ]);
+
+  llamaServerProcess.stdout?.on("data", (data) => {
+    console.log(`[llama-server]: ${data.toString().trim()}`);
+  });
+
+  llamaServerProcess.stderr?.on("data", (data) => {
+    console.log(`[llama-server err]: ${data.toString().trim()}`);
+  });
+
+  llamaServerProcess.on("close", (code) => {
+    console.log(`[Local AI] Process exited with code ${code}`);
+    llamaServerProcess = null;
+  });
+}
 
 interface DebugSession {
   gdbProcess: ChildProcess;
@@ -82,8 +122,6 @@ function parseGdbMiLine(session: DebugSession, line: string, appendNewline = fal
   const streamMatch = trimmed.match(/^(~|&|@)"((?:\\.|[^"\\])*)"$/);
   if (streamMatch) {
     const decoded = decodeGdbMiString(streamMatch[2]);
-    // Only forward target stream (@) as program stdout.
-    // Ignore console stream (~) to avoid GDB banner/source chatter in terminal output.
     if (streamMatch[1] === "@") {
       session.programStdout += decoded;
     } else if (streamMatch[1] === "&") {
@@ -92,8 +130,6 @@ function parseGdbMiLine(session: DebugSession, line: string, appendNewline = fal
     return;
   }
 
-  // Handle mixed records where inferior stdout is directly followed by MI data,
-  // e.g. "Hello^running" or "Hello*stopped,..." when no trailing newline exists.
   const mixedMiMatch = line.match(/(?:\d+\^|[\^*+=](?=[A-Za-z-])|[~&@]")/);
   if (mixedMiMatch && mixedMiMatch.index !== undefined && mixedMiMatch.index > 0) {
     const plainPrefix = line.slice(0, mixedMiMatch.index);
@@ -108,8 +144,6 @@ function parseGdbMiLine(session: DebugSession, line: string, appendNewline = fal
     return;
   }
 
-  // Some GDB builds emit inferior stdout as plain lines (without @"...").
-  // Forward those lines as program output, but ignore MI control/meta records.
   const isMiMetaRecord = /^(?:\d+)?[\^*+=]/.test(trimmed) || trimmed === "(gdb)";
   if (!isMiMetaRecord) {
     session.programStdout += appendNewline ? `${line}\n` : line;
@@ -281,24 +315,20 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
   const WS_PATH = "/ws";
+
+  // Start Local AI engine process
+  startLlamaServer();
+
   const SYSTEM_INSTRUCTION = `
 You are an expert, friendly computer science tutor integrated into a visual web application. Your purpose is to explain C programming concepts and guide users.
 
 CRITICAL FORMATTING & LENGTH RULES:
-1. NEVER use headers, markdown titles, emojis, lists, or structured sections (e.g. do not use "WHAT WENT WRONG", "POTENTIAL CAUSES", etc.).
+1. NEVER use headers, markdown titles, emojis, lists, or structured sections.
 2. Write exactly one or two conversational sentences explaining what the error is and how to fix it.
 3. Use a casual, direct tone—like a helpful peer speaking to a friend.
 4. Keep the response under 30 words total.
-
-When the user encounters a terminal/compilation error, you must follow this exact structural template:
-1. State the exact error clearly in a short sentence.
-2. Brief bullet points explaining why this happened in the code or visual nodes.
-3. Give direct, action-oriented code instructions to fix it immediately.
-
-General Rules:
-- If explaining logic or concepts outside an error, keep it limited to a few short bullet points or sentences.
-- If the user asks about anything outside C programming or computer science, politely and briefly redirect them back to learning C.
 `;
+
   const getGeminiClient = () => {
     const rawKey = process.env.GEMINI_API_KEY?.trim();
     const normalizedKey = rawKey?.replace(/^['"]|['"]$/g, "");
@@ -307,6 +337,7 @@ General Rules:
 
   app.use(express.json());
 
+  // ===== Existing Online Gemini Route =====
   app.post("/api/gemini", async (req, res) => {
     const { prompt, messages, systemInstruction } = req.body as {
       prompt?: string;
@@ -322,10 +353,8 @@ General Rules:
     const geminiClient = getGeminiClient();
 
     if (!geminiClient) {
-      console.error("Gemini configuration missing: set GEMINI_API_KEY in your environment or .env file.");
-      res.status(500).json({
-        error: "GEMINI_API_KEY is not configured on the server. Add it to a .env file or your shell environment and restart the app.",
-      });
+      console.error("Gemini configuration missing.");
+      res.status(500).json({ error: "GEMINI_API_KEY is not configured on the server." });
       return;
     }
 
@@ -347,6 +376,47 @@ General Rules:
     } catch (error) {
       console.error("Gemini API Error:", error);
       res.status(502).json({ error: "Error connecting to Gemini API." });
+    }
+  });
+
+  // ===== NEW Offline Local AI Route (seec-tutor GGUF) =====
+  app.post("/api/local-ai", async (req, res) => {
+    const { prompt, messages } = req.body as {
+      prompt?: string;
+      messages?: Array<{ sender?: string; text?: string }>;
+    };
+
+    if (!prompt || typeof prompt !== "string") {
+      res.status(400).json({ error: "A prompt is required." });
+      return;
+    }
+
+    try {
+      const compactContext = buildCompressedContext(messages);
+      const fullPrompt = compactContext
+        ? `${compactContext}\nUser: ${prompt}`
+        : prompt;
+
+      // Communicate with llama-server running locally at port 8080
+      const localResponse = await fetch("http://127.0.0.1:8080/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [
+            { role: "system", content: "You are SeeC Tutor, an expert C programming assistant." },
+            { role: "user", content: fullPrompt }
+          ],
+          temperature: 0.2,
+          max_tokens: 512
+        })
+      });
+
+      const data = await localResponse.json();
+      const text = data.choices?.[0]?.message?.content || "No local response generated.";
+      res.json({ text });
+    } catch (error) {
+      console.error("Local AI Endpoint Error:", error);
+      res.status(503).json({ error: "Local AI model server is offline or busy." });
     }
   });
 
@@ -434,6 +504,13 @@ General Rules:
 
 function gracefulShutdown(httpServer: any, wss: WebSocketServer) {
   wsLog('Closing WebSocket server...');
+
+  // Kill local AI server process if running
+  if (llamaServerProcess) {
+    console.log("[Local AI] Shutting down llama-server...");
+    llamaServerProcess.kill();
+    llamaServerProcess = null;
+  }
   
   // Close all WebSocket connections
   wss.clients.forEach((client) => {
@@ -450,7 +527,6 @@ function gracefulShutdown(httpServer: any, wss: WebSocketServer) {
   httpServer.close(() => {
     wsLog('✓ HTTP server closed');
     
-    // Kill any remaining processes
     if (runningProcess) {
       wsLog('Killing running process...');
       runningProcess.kill();
@@ -462,12 +538,10 @@ function gracefulShutdown(httpServer: any, wss: WebSocketServer) {
       cleanActiveGdbSession();
     }
     
-    // Exit the process
     wsLog('Exiting...');
     process.exit(0);
   });
   
-  // Force exit after 5 seconds if graceful shutdown takes too long
   setTimeout(() => {
     wsLog('✗ Graceful shutdown timeout, forcing exit...');
     process.exit(1);
@@ -483,7 +557,6 @@ startServer().catch((error) => {
 function handleRunCode(ws: WebSocket, codeString: string) {
   wsLog('Processing RUN_CODE...');
 
-  // Kill any existing process
   if (runningProcess) {
     wsLog('Killing existing process...');
     runningProcess.kill();
@@ -500,7 +573,6 @@ function handleRunCode(ws: WebSocket, codeString: string) {
   const { cFilename, exeFilename } = getCodePaths('program');
 
   try {
-    // Inject includes and unbuffered I/O setup
     let finalCode = codeString;
     if (!finalCode.includes("#include <stdlib.h>")) {
       finalCode = "#include <stdlib.h>\n" + finalCode;
@@ -516,7 +588,6 @@ function handleRunCode(ws: WebSocket, codeString: string) {
     fs.writeFileSync(cFilename, finalCode);
     wsLog(`Wrote code to ${cFilename}`);
 
-    // Compile the code
     wsLog('Compiling C code...');
     const compileProcess = spawn(gccPath, [cFilename, '-o', exeFilename]);
     let compileStderr = '';
@@ -543,34 +614,29 @@ function handleRunCode(ws: WebSocket, codeString: string) {
 
       wsLog('✓ Compilation successful, spawning process...');
 
-      // Spawn the executable
       runningProcess = spawn(exeFilename, [], {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
       });
 
-      // Handle stdout
       runningProcess.stdout?.on('data', (data: Buffer) => {
         const output = data.toString();
         wsLog(`[program stdout] ${output}`);
         sendToClient('Outputs', output);
       });
 
-      // Handle stderr
       runningProcess.stderr?.on('data', (data: Buffer) => {
         const output = data.toString();
         wsLog(`[program stderr] ${output}`);
         sendToClient('Error', output);
       });
 
-      // Handle process exit
       runningProcess.on('close', (code) => {
         wsLog(`✓ Process exited with code ${code}`);
         sendToClient('Status', `Process exited with code ${code}`);
         runningProcess = null;
       });
 
-      // Handle process errors
       runningProcess.on('error', (err) => {
         wsLog(`✗ Process error: ${err.message}`);
         sendToClient('Error', `Process error: ${err.message}`);
@@ -593,7 +659,6 @@ function handleSendInput(inputText: string) {
 
   const textToSend = inputText.endsWith('\n') ? inputText : inputText + '\n';
 
-  // Debug session takes priority when active.
   if (activeDebugSession?.gdbProcess.stdin && activeDebugSession.gdbProcess.stdin.writable) {
     try {
       activeDebugSession.gdbProcess.stdin.write(textToSend);
@@ -656,8 +721,6 @@ function handleDebug(ws: WebSocket, codeString: string) {
   const { cFilename, exeFilename } = getCodePaths('SeeC_Debug_Workspace');
 
   try {
-    // Preserve source line numbers and still force immediate stdout/stderr flush.
-    // This injects setup on the same 'main {' line so line mapping remains stable.
     let debugCode = codeString;
     debugCode = debugCode.replace(
       /(\bmain\s*\([^)]*\)\s*\{)/,
@@ -737,7 +800,6 @@ function handleDebug(ws: WebSocket, codeString: string) {
         }
       });
 
-      // Wait for initial breakpoint boundary catch
       const waitForInitial = setInterval(() => {
         if (responseAlreadySent) return;
         
@@ -835,7 +897,6 @@ function handleDebugStep(ws: WebSocket, mode: "over" | "into" | "out") {
         return;
       }
 
-      // Non-input lines should not enter input-wait state.
       if (session.stepPoll) {
         clearInterval(session.stepPoll);
         session.stepPoll = null;

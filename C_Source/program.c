@@ -5,7 +5,9 @@ int main() {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
-    if (x > 0) {
-    }
+    printf("Hello World\n");
+    int x = 0;
+    scanf("%d", &x);
+    printf("%d\n", y);
     return 0;
 }
