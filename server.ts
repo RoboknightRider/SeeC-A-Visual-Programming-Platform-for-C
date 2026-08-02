@@ -379,11 +379,12 @@ CRITICAL FORMATTING & LENGTH RULES:
     }
   });
 
-  // ===== NEW Offline Local AI Route (seec-tutor GGUF) =====
+  // ===== Offline Local AI Route =====
   app.post("/api/local-ai", async (req, res) => {
-    const { prompt, messages } = req.body as {
+    const { prompt, messages, systemInstruction } = req.body as {
       prompt?: string;
       messages?: Array<{ sender?: string; text?: string }>;
+      systemInstruction?: string;
     };
 
     if (!prompt || typeof prompt !== "string") {
@@ -397,17 +398,27 @@ CRITICAL FORMATTING & LENGTH RULES:
         ? `${compactContext}\nUser: ${prompt}`
         : prompt;
 
-      // Communicate with llama-server running locally at port 8080
+      // Construct OpenAI-compatible payload for llama-server
+      const formattedMessages = [
+        // System instruction passed from gemini.ts (or default fallback)
+        { role: "system", content: systemInstruction || SYSTEM_INSTRUCTION },
+        ...((messages || [])
+          .filter((m) => m?.sender && typeof m.text === "string")
+          .map((m) => ({
+            role: m.sender === "user" ? "user" : "assistant",
+            content: m.text || "",
+          }))),
+        { role: "user", content: fullPrompt }
+      ];
+
       const localResponse = await fetch("http://127.0.0.1:8080/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: [
-            { role: "system", content: "You are SeeC Tutor, an expert C programming assistant." },
-            { role: "user", content: fullPrompt }
-          ],
-          temperature: 0.2,
-          max_tokens: 512
+          messages: formattedMessages,
+          temperature: 0.1,
+          max_tokens: 150, // Increased slightly to give room for short error bullet points
+          stop: ["User:", "Assistant:", "Explanation:", "\n\n\n"]
         })
       });
 

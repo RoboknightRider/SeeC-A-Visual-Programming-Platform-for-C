@@ -11,7 +11,7 @@ export async function askLocalAI(
       body: JSON.stringify({ 
         prompt, 
         messages,
-        systemInstruction 
+        systemInstruction, 
       })
     });
 

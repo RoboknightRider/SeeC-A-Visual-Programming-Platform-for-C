@@ -3,7 +3,13 @@ import { askLocalAI } from './localAi';
 
 export type AIProvider = 'gemini' | 'local';
 
-const SYSTEM_INSTRUCTION = `
+export interface AIResponse {
+  text: string;
+  usedProvider: AIProvider;
+}
+
+// Export it if you ever need it in other files as well
+export const SYSTEM_INSTRUCTION = `
 You are an expert, friendly computer science tutor integrated into a visual web application. Your purpose is to explain C programming concepts and guide users.
 
 CRITICAL FORMATTING & LENGTH RULES:
@@ -14,14 +20,15 @@ CRITICAL FORMATTING & LENGTH RULES:
 5. NEVER output prompt labels like "User:", "Assistant:", "Error Type:", or "Explanation:".
 
 When the user encounters a terminal/compilation error, you must follow this exact structural template:
-1. State the exact error clearly in a short sentence.
-2. Brief bullet points explaining why this happened in the code or visual nodes.
+1. Sentence 1: State what went wrong directly.
+2. Bullet points: Maximum 2 short bullet points showing why it happened and how to fix it in code.
 3. Give direct, action-oriented code instructions to fix it immediately.
 
 General Rules:
 - If explaining logic or concepts outside an error, keep it limited to a few short bullet points or sentences.
 - If the user asks about anything outside C programming or computer science, politely and briefly redirect them back to learning C.
 `;
+
 
 /**
  * Calls Gemini API.
@@ -30,44 +37,43 @@ General Rules:
 export async function askGemini(
   prompt: string, 
   messages: Array<{ sender: 'user' | 'ai'; text: string }> = []
-): Promise<string> {
+): Promise<AIResponse> {
+  // If browser is explicitly offline, don't even wait for a network timeout
+  if (!navigator.onLine) {
+    const text = await askLocalAI(prompt, messages, SYSTEM_INSTRUCTION);
+    return { text, usedProvider: 'local' };
+  }
+
   try {
     const response = await fetch('/api/gemini', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt,
-        messages,
-        systemInstruction: SYSTEM_INSTRUCTION,
-      }),
+      body: JSON.stringify({ prompt, messages, systemInstruction: SYSTEM_INSTRUCTION }),
     });
 
     const data = (await response.json()) as { text?: string; error?: string };
 
     if (!response.ok) {
-      console.warn('Gemini API error response. Falling back to local AI...');
-      return await askLocalAI(prompt, messages);
+      const fallbackText = await askLocalAI(prompt, messages, SYSTEM_INSTRUCTION);
+      return { text: fallbackText, usedProvider: 'local' };
     }
 
-    return data.text || 'No response received.';
+    return { text: data.text || 'No response received.', usedProvider: 'gemini' };
   } catch (error) {
-    console.warn('Gemini network error. Falling back to local AI...', error);
-    return await askLocalAI(prompt, messages);
+    // Network error or offline drop during request -> Fallback to Local
+    const fallbackText = await askLocalAI(prompt, messages, SYSTEM_INSTRUCTION);
+    return { text: fallbackText, usedProvider: 'local' };
   }
 }
 
-/**
- * Unified entry point that explicitly respects the radio button selection:
- * - 'local'  -> directly calls askLocalAI (works offline & online)
- * - 'gemini' -> calls askGemini (with fallback if network drops)
- */
 export async function askAI(
   prompt: string,
   messages: Array<{ sender: 'user' | 'ai'; text: string }> = [],
   provider: AIProvider = 'gemini'
-): Promise<string> {
+): Promise<AIResponse> {
   if (provider === 'local') {
-    return await askLocalAI(prompt, messages);
+    const text = await askLocalAI(prompt, messages, SYSTEM_INSTRUCTION);
+    return { text, usedProvider: 'local' };
   }
   
   return await askGemini(prompt, messages);

@@ -4,13 +4,14 @@ import ReactMarkdown from 'react-markdown';
 import { cn } from '../lib/utils'; 
 import { askAI, type AIProvider as GeminiAIProvider } from '../services/gemini';
 
-// Fallback type definition to ensure no TypeScript compilation issues
 type AIProvider = GeminiAIProvider | 'gemini' | 'local';
 
+// 1. Updated Message interface to store provider in message state
 interface Message {
   id: string;
   sender: 'user' | 'ai';
   text: string;
+  provider?: AIProvider; // <-- Stores who answered this specific message
 }
 
 interface MessageSegment {
@@ -33,7 +34,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
   clearInitialError    
 }) => {
   const [messages, setMessages] = useState<Message[]>([
-    { id: '1', sender: 'ai', text: "Hello! I am your SeeC AI Assistant. How can I help you today?" }
+    { id: '1', sender: 'ai', text: "Hello! I am your SeeC AI Assistant. How can I help you today?", provider: 'gemini' }
   ]);
   const [chatInput, setChatInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -90,11 +91,14 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     }
   }, []);
 
+  // 2. Updated handleSendMessage to save provider into state
   const handleSendMessage = useCallback(async () => {
     const trimmedInput = chatInput.trim();
     if (!trimmedInput || isLoading) return;
 
     const userText = trimmedInput;
+    const currentProvider = aiProvider;
+
     const userMessage: Message = {
       id: Date.now().toString(),
       sender: 'user',
@@ -106,20 +110,27 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     setChatInput('');
     setIsLoading(true);
 
-    const aiResponseText = await askAI(userText, nextMessages, aiProvider);
+    const res = await askAI(userText, nextMessages, currentProvider);
+    
+    // Safely extract text and provider regardless of whether askAI returns a string or an object
+    const aiResponseText = typeof res === 'string' ? res : res.text;
+    const actualProvider = typeof res === 'string' ? currentProvider : (res.usedProvider || currentProvider);
 
     const aiReply: Message = {
       id: (Date.now() + 1).toString(),
       sender: 'ai',
-      text: aiResponseText
+      text: aiResponseText,
+      provider: actualProvider // <-- Provider saved in state here
     };
     
     setMessages(prev => [...prev, aiReply]);
     setIsLoading(false);
   }, [chatInput, isLoading, messages, aiProvider]);
 
+  // 3. Updated handleAutoSendError to save provider into state
   const handleAutoSendError = useCallback(async (errorText: string) => {
     setIsLoading(true);
+    const currentProvider = aiProvider;
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -130,12 +141,16 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     const nextMessages = [...messages, userMessage];
     setMessages(nextMessages);
 
-    const aiResponseText = await askAI(userMessage.text, nextMessages, aiProvider);
+    const res = await askAI(userMessage.text, nextMessages, currentProvider);
+    
+    const aiResponseText = typeof res === 'string' ? res : res.text;
+    const actualProvider = typeof res === 'string' ? currentProvider : (res.usedProvider || currentProvider);
 
     const aiReply: Message = {
       id: (Date.now() + 1).toString(),
       sender: 'ai',
-      text: aiResponseText
+      text: aiResponseText,
+      provider: actualProvider // <-- Provider saved in state here
     };
 
     setMessages(prev => [...prev, aiReply]);
@@ -157,16 +172,15 @@ export const Chatbox: React.FC<ChatboxProps> = ({
   return (
     <div className="fixed right-3 bottom-3 w-[min(26rem,calc(100vw-1.5rem))] max-h-[min(42rem,calc(100dvh-1.5rem))] h-[min(28rem,calc(100dvh-1.5rem))] bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl z-[999] flex flex-col overflow-hidden">
       
-      {/* Header with Side-by-Side Radio Switcher */}
+      {/* Header */}
       <div className="p-3 border-b border-zinc-800 bg-zinc-900 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 shrink-0">
           <MessageSquare className="text-blue-500 w-4 h-4" />
           <h3 className="text-xs font-bold text-white hidden sm:block">SeeC AI</h3>
         </div>
 
-        {/* Side-by-Side Radio Option */}
+        {/* Radio Switcher */}
         <div className="flex items-center bg-zinc-950 p-1 rounded-lg border border-zinc-800 text-[11px]">
-          {/* Gemini Radio */}
           <label
             className={cn(
               "flex items-center gap-1 px-2.5 py-1 rounded-md cursor-pointer transition-all select-none",
@@ -187,7 +201,6 @@ export const Chatbox: React.FC<ChatboxProps> = ({
             <span>Gemini</span>
           </label>
 
-          {/* Local AI Radio */}
           <label
             className={cn(
               "flex items-center gap-1 px-2.5 py-1 rounded-md cursor-pointer transition-all select-none",
@@ -222,17 +235,40 @@ export const Chatbox: React.FC<ChatboxProps> = ({
       <div className="flex-1 p-4 overflow-y-auto space-y-4 bg-black/10 font-sans text-xs flex flex-col">
         {messages.map((msg) => {
           const segments = msg.sender === 'ai' ? parseMessageSegments(msg.text) : [];
+          const isUser = msg.sender === 'user';
+          
+          // 4. Read stored provider from message state
+          const isLocal = msg.provider === 'local';
 
           return (
             <div 
               key={msg.id} 
               className={cn(
-                "p-3 rounded-lg max-w-[85%] break-words border",
-                msg.sender === 'user' 
+                "p-3 rounded-lg max-w-[85%] break-words border transition-colors",
+                isUser 
                   ? "bg-blue-600/20 border-blue-500/40 text-blue-200 self-end" 
-                  : "bg-zinc-800/60 border-zinc-700/40 text-zinc-300 self-start"
+                  : isLocal
+                    ? "bg-amber-950/30 border-amber-500/30 text-amber-100 self-start" // Local AI Style
+                    : "bg-emerald-950/30 border-emerald-500/30 text-emerald-100 self-start" // Gemini Style
               )}
             >
+              {/* Render Provider Badge for AI messages */}
+              {!isUser && (
+                <div className="flex items-center gap-1.5 mb-1.5 text-[10px] font-semibold tracking-wide uppercase opacity-75">
+                  {isLocal ? (
+                    <>
+                      <Cpu size={11} className="text-amber-400" />
+                      <span className="text-amber-400">Local AI</span>
+                    </>
+                  ) : (
+                    <>
+                      <Globe size={11} className="text-emerald-400" />
+                      <span className="text-emerald-400">Gemini AI</span>
+                    </>
+                  )}
+                </div>
+              )}
+
               {msg.sender === 'ai' && segments.length > 0 ? (
                 <div className="space-y-2">
                   {segments.map((segment, index) => {
