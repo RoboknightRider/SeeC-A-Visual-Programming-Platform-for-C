@@ -1,8 +1,9 @@
 node_modules/
-dist/
+C_Build/*
+!C_Build/
+C_Source/*
+!C_Source/
 .env
-.env.local
-.env.*.local
-models/
+models/*
+!models/
 *.gguf
-*.bin

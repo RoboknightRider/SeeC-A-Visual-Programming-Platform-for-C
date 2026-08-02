@@ -448,7 +448,7 @@ const TerminalPanel = React.memo(({
                   onClick={(e) => { e.stopPropagation(); handleAskAI(); }}
                   className="bg-purple-600 hover:bg-purple-500 text-white font-bold px-3 py-1.5 rounded text-[10px] uppercase tracking-wider transition-all flex items-center gap-2 shadow-lg"
                 >
-                  🤖 Ask AI to Fix
+                  🤖 Explain
                 </button>
               </div>
             )}
@@ -615,7 +615,7 @@ function Flow() {
     const fullLogString = terminalLogs.join("\n");
     setActiveErrorLog(fullLogString);
     setShowChat(true);
-  }, [terminalLogs]);
+  }, [terminalLogs, generatedCode]);
 
   const saveProject = useCallback(() => {
     const exportProject = (window as Window & { exportProject?: () => string }).exportProject;
@@ -951,6 +951,7 @@ function Flow() {
         showChat={showChat}
         setShowChat={setShowChat}
         initialError={activeErrorLog}
+        initialCode={generatedCode}
         clearInitialError={() => setActiveErrorLog('')}
       />
 

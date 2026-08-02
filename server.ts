@@ -50,6 +50,22 @@ function startLlamaServer() {
   });
 }
 
+function getLocalAIStatus() {
+  const llamaExecutable = path.join(process.cwd(), "bin", "llama-server.exe");
+  const modelPath = path.join(process.cwd(), "models", "seec-tutor.gguf");
+
+  const executableExists = fs.existsSync(llamaExecutable);
+  const modelExists = fs.existsSync(modelPath);
+  const processRunning = Boolean(llamaServerProcess && !llamaServerProcess.killed);
+
+  return {
+    executableExists,
+    modelExists,
+    processRunning,
+    available: executableExists && modelExists,
+  };
+}
+
 interface DebugSession {
   gdbProcess: ChildProcess;
   programStdout: string;
@@ -82,6 +98,12 @@ let wsClient: WebSocket | null = null;
 function wsLog(message: string) {
   const timestamp = new Date().toISOString();
   console.log(`[WS] [${timestamp}] ${message}`);
+}
+
+function sanitizeDiagnosticText(text: string) {
+  return text
+    .replace(/\b[A-Za-z]:[\\/][^:\r\n]*[\\/]([^\\/:\r\n]+\.(?:c|h|cpp|cc|cxx|exe))(?=:\d|:\s|$)/g, "$1")
+    .replace(/(^|\s)\/[^:\r\n]*\/([^\/:\r\n]+\.(?:c|h|cpp|cc|cxx|exe))(?=:\d|:\s|$)/g, (_, prefix: string, fileName: string) => `${prefix}${fileName}`);
 }
 
 function sendToClient(event: string, text: string) {
@@ -203,7 +225,7 @@ function flushDebugOutput(session: DebugSession) {
   }
 
   if (session.programStderr.length > session.lastStderrIndex) {
-    const err = session.programStderr.slice(session.lastStderrIndex);
+    const err = sanitizeDiagnosticText(session.programStderr.slice(session.lastStderrIndex));
     session.lastStderrIndex = session.programStderr.length;
     if (err) sendToClient('Error', err);
   }
@@ -336,6 +358,16 @@ CRITICAL FORMATTING & LENGTH RULES:
   };
 
   app.use(express.json());
+
+  app.get("/api/ai-status", (_req, res) => {
+    const geminiConfigured = Boolean(getGeminiClient());
+    const local = getLocalAIStatus();
+
+    res.json({
+      geminiConfigured,
+      local,
+    });
+  });
 
   // ===== Existing Online Gemini Route =====
   app.post("/api/gemini", async (req, res) => {
@@ -597,7 +629,7 @@ function handleRunCode(ws: WebSocket, codeString: string) {
     );
 
     fs.writeFileSync(cFilename, finalCode);
-    wsLog(`Wrote code to ${cFilename}`);
+    wsLog(`Wrote code to ${path.basename(cFilename)}`);
 
     wsLog('Compiling C code...');
     const compileProcess = spawn(gccPath, [cFilename, '-o', exeFilename]);
@@ -607,19 +639,19 @@ function handleRunCode(ws: WebSocket, codeString: string) {
     compileProcess.stdout?.on('data', (data: Buffer) => {
       const s = data.toString();
       compileStdout += s;
-      wsLog(`[compiler stdout] ${s}`);
+      wsLog(`[compiler stdout] ${sanitizeDiagnosticText(s)}`);
     });
 
     compileProcess.stderr?.on('data', (data: Buffer) => {
       const s = data.toString();
       compileStderr += s;
-      wsLog(`[compiler stderr] ${s}`);
+      wsLog(`[compiler stderr] ${sanitizeDiagnosticText(s)}`);
     });
 
     compileProcess.on('close', (exitCode) => {
       if (exitCode !== 0) {
         wsLog(`✗ Compilation failed with code ${exitCode}`);
-        sendToClient('Error', `Compilation error:\n${compileStderr || compileStdout}`);
+        sendToClient('Error', `Compilation error:\n${sanitizeDiagnosticText(compileStderr || compileStdout)}`);
         return;
       }
 
@@ -638,8 +670,9 @@ function handleRunCode(ws: WebSocket, codeString: string) {
 
       runningProcess.stderr?.on('data', (data: Buffer) => {
         const output = data.toString();
-        wsLog(`[program stderr] ${output}`);
-        sendToClient('Error', output);
+        const sanitizedOutput = sanitizeDiagnosticText(output);
+        wsLog(`[program stderr] ${sanitizedOutput}`);
+        sendToClient('Error', sanitizedOutput);
       });
 
       runningProcess.on('close', (code) => {
@@ -739,7 +772,7 @@ function handleDebug(ws: WebSocket, codeString: string) {
     );
 
     fs.writeFileSync(cFilename, debugCode);
-    wsLog(`Wrote debug code to ${cFilename}`);
+    wsLog(`Wrote debug code to ${path.basename(cFilename)}`);
 
     const compileProcess = spawn(gccPath, ['-g', '-O0', '-Wall', '-Wextra', cFilename, '-o', exeFilename]);
 
@@ -749,19 +782,19 @@ function handleDebug(ws: WebSocket, codeString: string) {
     compileProcess.stdout?.on('data', (data) => {
       const s = data.toString();
       compileStdout += s;
-      wsLog(`[DEBUG compiler stdout] ${s}`);
+      wsLog(`[DEBUG compiler stdout] ${sanitizeDiagnosticText(s)}`);
     });
 
     compileProcess.stderr?.on('data', (data) => {
       const s = data.toString();
       compileStderr += s;
-      wsLog(`[DEBUG compiler stderr] ${s}`);
+      wsLog(`[DEBUG compiler stderr] ${sanitizeDiagnosticText(s)}`);
     });
 
     compileProcess.on('close', (exitCode) => {
       if (exitCode !== 0) {
         wsLog(`✗ Debug compilation failed with code ${exitCode}`);
-        sendToClient('Error', `Debug compilation error:\n${compileStderr || compileStdout}`);
+        sendToClient('Error', `Debug compilation error:\n${sanitizeDiagnosticText(compileStderr || compileStdout)}`);
         return;
       }
 

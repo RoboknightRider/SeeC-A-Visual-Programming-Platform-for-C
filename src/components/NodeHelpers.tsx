@@ -158,11 +158,10 @@ const DataInput = React.memo(({ label, value, onChange, placeholder, type = "tex
       <input 
         type={type}
         value={inputValue} 
-        onChange={(e) => setInputValue(e.target.value)}
-        onBlur={() => {
-          if (inputValue !== value) {
-            onChange(inputValue);
-          }
+        onChange={(e) => {
+          const nextValue = e.target.value;
+          setInputValue(nextValue);
+          onChange(nextValue);
         }}
         placeholder={placeholder}
         disabled={disabled}
@@ -213,7 +212,8 @@ export const GenericNode = React.memo((props: any) => {
         return node;
       })
     );
-    triggerDataChange();
+    // Fire after React applies the node update so listeners read fresh state.
+    setTimeout(triggerDataChange, 0);
   }, [id, setNodes, triggerDataChange]);
   
   return (

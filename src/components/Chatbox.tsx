@@ -1,8 +1,8 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { MessageSquare, X, Send, Loader2, Copy, Check, Cpu, Globe } from 'lucide-react';
+import { MessageSquare, X, Send, Loader2, Copy, Check, Cpu, Globe, Maximize2, Minimize2, Trash2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { cn } from '../lib/utils'; 
-import { askAI, type AIProvider as GeminiAIProvider } from '../services/gemini';
+import { askAI, type AIProvider as GeminiAIProvider } from '../services/codingAgent';
 
 type AIProvider = GeminiAIProvider | 'gemini' | 'local';
 
@@ -23,31 +23,142 @@ interface MessageSegment {
 interface ChatboxProps {
   showChat: boolean;
   setShowChat: (show: boolean) => void;
-  initialError?: string;               
+  initialError?: string;
+  initialCode?: string;               
   clearInitialError?: () => void;
 }
 
-export const Chatbox: React.FC<ChatboxProps> = ({ 
-  showChat, 
+interface AIStatusResponse {
+  geminiConfigured: boolean;
+  local?: {
+    executableExists?: boolean;
+    modelExists?: boolean;
+    processRunning?: boolean;
+    available?: boolean;
+  };
+}
+
+const AI_PROVIDER_SESSION_KEY = 'seec-ai-provider';
+const DEFAULT_CHATBOX_WIDTH = 416;
+const DEFAULT_CHATBOX_HEIGHT = 448;
+const MIN_CHATBOX_WIDTH = 340;
+const MIN_CHATBOX_HEIGHT = 320;
+const INITIAL_CHAT_MESSAGES: Message[] = [
+  { id: '1', sender: 'ai', text: 'Hello! I am your SeeC AI Assistant. How can I help you today?', provider: 'gemini' },
+];
+
+const getInitialProvider = (): AIProvider => {
+  if (typeof window === 'undefined') {
+    return 'gemini';
+  }
+
+  const saved = window.sessionStorage.getItem(AI_PROVIDER_SESSION_KEY);
+  return saved === 'local' ? 'local' : 'gemini';
+};
+
+export const Chatbox: React.FC<ChatboxProps> = ({
+  showChat,
   setShowChat,
-  initialError,        
+  initialError,
+  initialCode,        
   clearInitialError    
 }) => {
-  const [messages, setMessages] = useState<Message[]>([
-    { id: '1', sender: 'ai', text: "Hello! I am your SeeC AI Assistant. How can I help you today?", provider: 'gemini' }
-  ]);
+  const [messages, setMessages] = useState<Message[]>(INITIAL_CHAT_MESSAGES);
   const [chatInput, setChatInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
+  const [geminiAvailable, setGeminiAvailable] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [chatboxSize, setChatboxSize] = useState({ width: DEFAULT_CHATBOX_WIDTH, height: DEFAULT_CHATBOX_HEIGHT });
   
-  // Track active AI provider choice
-  const [aiProvider, setAiProvider] = useState<AIProvider>('gemini');
+  const [aiProvider, setAiProvider] = useState<AIProvider>(getInitialProvider);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const resizeStateRef = useRef<{ startX: number; startY: number; startWidth: number; startHeight: number } | null>(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchAIStatus = async () => {
+      try {
+        const response = await fetch('/api/ai-status');
+        if (!response.ok) {
+          return;
+        }
+
+        const data = (await response.json()) as AIStatusResponse;
+        if (!isMounted) {
+          return;
+        }
+
+        const configured = Boolean(data.geminiConfigured);
+        setGeminiAvailable(configured);
+        if (!configured) {
+          setAiProvider('local');
+        }
+      } catch (error) {
+        // Keep current defaults if status fetch fails.
+      }
+    };
+
+    fetchAIStatus();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.sessionStorage.setItem(AI_PROVIDER_SESSION_KEY, aiProvider);
+  }, [aiProvider]);
+
+  useEffect(() => {
+    if (isFullscreen) {
+      resizeStateRef.current = null;
+    }
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    if (!showChat) {
+      resizeStateRef.current = null;
+    }
+  }, [showChat]);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const resizeState = resizeStateRef.current;
+      if (!resizeState) {
+        return;
+      }
+
+      const maxWidth = Math.max(MIN_CHATBOX_WIDTH, window.innerWidth - 24);
+      const maxHeight = Math.max(MIN_CHATBOX_HEIGHT, window.innerHeight - 24);
+      const nextWidth = Math.min(maxWidth, Math.max(MIN_CHATBOX_WIDTH, resizeState.startWidth + (resizeState.startX - event.clientX)));
+      const nextHeight = Math.min(maxHeight, Math.max(MIN_CHATBOX_HEIGHT, resizeState.startHeight + (resizeState.startY - event.clientY)));
+
+      setChatboxSize({ width: nextWidth, height: nextHeight });
+    };
+
+    const stopResize = () => {
+      resizeStateRef.current = null;
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResize);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResize);
+    };
+  }, []);
 
   const parseMessageSegments = useCallback((text: string): MessageSegment[] => {
     const segments: MessageSegment[] = [];
@@ -91,6 +202,32 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     }
   }, []);
 
+  const handleClearChat = useCallback(() => {
+    setMessages(INITIAL_CHAT_MESSAGES);
+    setChatInput('');
+    setCopiedCodeKey(null);
+    setIsLoading(false);
+
+    if (clearInitialError) {
+      clearInitialError();
+    }
+  }, [clearInitialError]);
+
+  const handleResizeStart = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (isFullscreen) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    resizeStateRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: chatboxSize.width,
+      startHeight: chatboxSize.height,
+    };
+  }, [chatboxSize.height, chatboxSize.width, isFullscreen]);
+
   // 2. Updated handleSendMessage to save provider into state
   const handleSendMessage = useCallback(async () => {
     const trimmedInput = chatInput.trim();
@@ -122,6 +259,10 @@ export const Chatbox: React.FC<ChatboxProps> = ({
       text: aiResponseText,
       provider: actualProvider // <-- Provider saved in state here
     };
+
+    if (currentProvider === 'gemini' && actualProvider === 'local') {
+      setAiProvider('local');
+    }
     
     setMessages(prev => [...prev, aiReply]);
     setIsLoading(false);
@@ -132,10 +273,15 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     setIsLoading(true);
     const currentProvider = aiProvider;
 
+    let promptText = `I encountered a compilation/execution error in my C code. Can you analyze this terminal log and guide me on how to fix my flow diagrams?\n\n\`\`\`text\n${errorText}\n\`\`\``;
+    if (initialCode && initialCode.trim()) {
+      promptText += `\n\nHere's the generated C code:\n\`\`\`c\n${initialCode}\n\`\`\``;
+    }
+
     const userMessage: Message = {
       id: Date.now().toString(),
       sender: 'user',
-      text: `I encountered a compilation/execution error in my C code. Can you analyze this terminal log and guide me on how to fix my flow diagrams?\n\n\`\`\`text\n${errorText}\n\`\`\``
+      text: promptText
     };
 
     const nextMessages = [...messages, userMessage];
@@ -153,9 +299,13 @@ export const Chatbox: React.FC<ChatboxProps> = ({
       provider: actualProvider // <-- Provider saved in state here
     };
 
+    if (currentProvider === 'gemini' && actualProvider === 'local') {
+      setAiProvider('local');
+    }
+
     setMessages(prev => [...prev, aiReply]);
     setIsLoading(false);
-  }, [messages, aiProvider]);
+  }, [messages, aiProvider, initialCode]);
 
   useEffect(() => {
     if (initialError && initialError.trim() !== "" && showChat && !isLoading) {
@@ -165,12 +315,31 @@ export const Chatbox: React.FC<ChatboxProps> = ({
         clearInitialError();
       }
     }
-  }, [initialError, showChat, isLoading, handleAutoSendError, clearInitialError]);
+  }, [initialError, initialCode, showChat, isLoading, handleAutoSendError, clearInitialError]);
 
   if (!showChat) return null;
 
+  const chatboxStyle = isFullscreen
+    ? {
+        inset: '12px',
+        width: 'auto',
+        height: 'auto',
+      }
+    : {
+        width: `${chatboxSize.width}px`,
+        height: `${chatboxSize.height}px`,
+      };
+
   return (
-    <div className="fixed right-3 bottom-3 w-[min(26rem,calc(100vw-1.5rem))] max-h-[min(42rem,calc(100dvh-1.5rem))] h-[min(28rem,calc(100dvh-1.5rem))] bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl z-[999] flex flex-col overflow-hidden">
+    <div
+      className={cn(
+        "fixed bg-zinc-900 border border-zinc-800 shadow-2xl z-[999] flex flex-col overflow-hidden",
+        isFullscreen
+          ? "rounded-xl"
+          : "right-3 bottom-3 min-w-[340px] min-h-[320px] max-w-[calc(100vw-1.5rem)] max-h-[calc(100dvh-1.5rem)] rounded-xl"
+      )}
+      style={chatboxStyle}
+    >
       
       {/* Header */}
       <div className="p-3 border-b border-zinc-800 bg-zinc-900 flex items-center justify-between gap-2">
@@ -195,10 +364,11 @@ export const Chatbox: React.FC<ChatboxProps> = ({
               value="gemini"
               checked={aiProvider === 'gemini'}
               onChange={() => setAiProvider('gemini')}
+              disabled={!geminiAvailable}
               className="sr-only"
             />
             <Globe className="w-3 h-3 text-emerald-400 shrink-0" />
-            <span>Gemini</span>
+            <span>{geminiAvailable ? 'Online AI' : 'Online AI (Unavailable)'}</span>
           </label>
 
           <label
@@ -218,17 +388,36 @@ export const Chatbox: React.FC<ChatboxProps> = ({
               className="sr-only"
             />
             <Cpu className="w-3 h-3 text-amber-400 shrink-0" />
-            <span>Local AI</span>
+            <span>Offline AI</span>
           </label>
         </div>
 
-        <button 
-          type="button"
-          onClick={() => setShowChat(false)} 
-          className="p-1.5 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors border border-zinc-800 bg-zinc-950 shrink-0"
-        >
-          <X size={14} />
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleClearChat}
+            className="p-1.5 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors border border-zinc-800 bg-zinc-950"
+            title="Clear chat history"
+          >
+            <Trash2 size={14} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsFullscreen((current) => !current)}
+            className="p-1.5 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors border border-zinc-800 bg-zinc-950"
+            title={isFullscreen ? 'Exit full screen' : 'Full screen'}
+          >
+            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          </button>
+          <button 
+            type="button"
+            onClick={() => setShowChat(false)} 
+            className="p-1.5 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors border border-zinc-800 bg-zinc-950"
+            title="Close chat"
+          >
+            <X size={14} />
+          </button>
+        </div>
       </div>
 
       {/* Messages Feed */}
@@ -258,12 +447,12 @@ export const Chatbox: React.FC<ChatboxProps> = ({
                   {isLocal ? (
                     <>
                       <Cpu size={11} className="text-amber-400" />
-                      <span className="text-amber-400">Local AI</span>
+                      <span className="text-amber-400">Offline AI</span>
                     </>
                   ) : (
                     <>
                       <Globe size={11} className="text-emerald-400" />
-                      <span className="text-emerald-400">Gemini AI</span>
+                      <span className="text-emerald-400">Online AI</span>
                     </>
                   )}
                 </div>
@@ -354,7 +543,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
             if (e.key === 'Enter') handleSendMessage();
           }}
           disabled={isLoading}
-          placeholder={isLoading ? "Thinking..." : `Ask ${aiProvider === 'local' ? 'Local AI' : 'Gemini'}...`} 
+          placeholder={isLoading ? "Thinking..." : `Ask ${aiProvider === 'local' ? 'Offline AI' : 'Online AI'}...`} 
           className="flex-1 bg-black/40 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
         />
         <button
@@ -366,6 +555,19 @@ export const Chatbox: React.FC<ChatboxProps> = ({
           <Send size={14} />
         </button>
       </div>
+
+      {!isFullscreen && (
+        <div
+          className="absolute left-0 top-0 z-10 h-full w-full pointer-events-none"
+          aria-hidden="true"
+        >
+          <div
+            className="absolute left-0 top-0 h-4 w-4 cursor-nwse-resize pointer-events-auto"
+            onPointerDown={handleResizeStart}
+            title="Resize chat window"
+          />
+        </div>
+      )}
     </div>
   );
 };
