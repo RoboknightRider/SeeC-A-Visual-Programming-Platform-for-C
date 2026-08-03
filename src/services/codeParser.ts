@@ -300,10 +300,7 @@ function matchTemplateStart(str: string, template: string) {
   try {
     const match = trimmedStart.match(regex);
     if (match) {
-      const data: any = {};
-      keys.forEach((key, i) => {
-        data[key] = (match[i + 1] || '').trim();
-      });
+      const data = buildTemplateData(keys, match);
 
       return { data, consumed: leadingTrim + match[0].length };
     }
@@ -318,16 +315,20 @@ function matchTemplate(str: string, template: string) {
   try {
     const match = normalizedStr.match(regex);
     if (match) {
-      const data: any = {};
-      keys.forEach((key, i) => {
-        data[key] = match[i + 1].trim();
-      });
-      return data;
+      return buildTemplateData(keys, match);
     }
   } catch (e) {
     console.error("Regex error for template:", template, e);
   }
   return null;
+}
+
+function buildTemplateData(keys: string[], match: RegExpMatchArray): Record<string, string> {
+  const data: Record<string, string> = {};
+  keys.forEach((key, i) => {
+    data[key] = (match[i + 1] || '').trim();
+  });
+  return data;
 }
 
 function prepareRegex(template: string, isStart: boolean) {
@@ -415,15 +416,13 @@ function isLikelyTypeSelectorValue(value: string): boolean {
   const v = value.trim();
   if (!v) return false;
   if (!/[A-Za-z_]/.test(v)) return false;
-  if (!/^[A-Za-z0-9_\s*]+$/.test(v)) return false;
-  return true;
+  return /^[A-Za-z0-9_\s*]+$/.test(v);
 }
 
 function isLikelyParameterList(value: string): boolean {
   const v = value.trim();
   if (!v) return true;
-  if (/[{};]/.test(v)) return false;
-  return true;
+  return !/[{};]/.test(v);
 }
 
 function isLikelyCompoundAssignmentOperator(value: string): boolean {

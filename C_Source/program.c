@@ -7,7 +7,7 @@ int main() {
 
     printf("Hello World\n");
     int x = 0;
-    scanf("%d", &y);
+    scanf("%d", &x);
     printf("%d\n", x);
     return 0;
 }

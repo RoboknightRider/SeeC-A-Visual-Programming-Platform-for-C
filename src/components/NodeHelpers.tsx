@@ -15,6 +15,14 @@ const FIELDS_ROW_CLASS = 'h-[52px] flex flex-nowrap items-end gap-1.5 overflow-x
 const FIELD_SLOT_CLASS = 'h-[52px] min-w-[104px] flex-none';
 const FIELD_STACK_CLASS = 'h-full flex flex-col justify-between';
 
+const NODE_THEME_STYLES: Record<string, { border: string; icon: string }> = {
+  blue: { border: 'border-blue-500 shadow-blue-500/20', icon: 'text-blue-500' },
+  emerald: { border: 'border-emerald-500 shadow-emerald-500/20', icon: 'text-emerald-500' },
+  amber: { border: 'border-amber-500 shadow-amber-500/20', icon: 'text-amber-500' },
+  purple: { border: 'border-purple-500 shadow-purple-500/20', icon: 'text-purple-500' },
+  rose: { border: 'border-rose-500 shadow-rose-500/20', icon: 'text-rose-500' },
+};
+
 type IconComponent = React.ComponentType<{ className?: string }>;
 
 export const icons: Record<string, IconComponent> = {
@@ -81,24 +89,9 @@ const NodeWrapper = React.memo(({
 }: NodeWrapperProps) => {
   const Icon = icons[data.type] || Terminal;
 
-  const colorMap: Record<string, string> = {
-    blue: 'border-blue-500 shadow-blue-500/20',
-    emerald: 'border-emerald-500 shadow-emerald-500/20',
-    amber: 'border-amber-500 shadow-amber-500/20',
-    purple: 'border-purple-500 shadow-purple-500/20',
-    rose: 'border-rose-500 shadow-rose-500/20',
-  };
-
-  const iconColorMap: Record<string, string> = {
-    blue: 'text-blue-500',
-    emerald: 'text-emerald-500',
-    amber: 'text-amber-500',
-    purple: 'text-purple-500',
-    rose: 'text-rose-500',
-  };
-
-  const colorClass = color ? (colorMap[color] || 'border-zinc-800') : 'border-zinc-800';
-  const iconColorClass = color ? (iconColorMap[color] || 'text-emerald-500') : 'text-emerald-500';
+  const theme = color ? NODE_THEME_STYLES[color] : undefined;
+  const colorClass = theme?.border || 'border-zinc-800';
+  const iconColorClass = theme?.icon || 'text-emerald-500';
 
   return (
     <div className={cn(

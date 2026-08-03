@@ -6,4 +6,3 @@ C_Source/*
 .env
 models/*
 !models/
-*.gguf

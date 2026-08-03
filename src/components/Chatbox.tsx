@@ -248,16 +248,13 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     setIsLoading(true);
 
     const res = await askAI(userText, nextMessages, currentProvider);
-    
-    // Safely extract text and provider regardless of whether askAI returns a string or an object
-    const aiResponseText = typeof res === 'string' ? res : res.text;
-    const actualProvider = typeof res === 'string' ? currentProvider : (res.usedProvider || currentProvider);
+    const actualProvider = res.usedProvider || currentProvider;
 
     const aiReply: Message = {
       id: (Date.now() + 1).toString(),
       sender: 'ai',
-      text: aiResponseText,
-      provider: actualProvider // <-- Provider saved in state here
+      text: res.text,
+      provider: actualProvider
     };
 
     if (currentProvider === 'gemini' && actualProvider === 'local') {
@@ -288,15 +285,13 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     setMessages(nextMessages);
 
     const res = await askAI(userMessage.text, nextMessages, currentProvider);
-    
-    const aiResponseText = typeof res === 'string' ? res : res.text;
-    const actualProvider = typeof res === 'string' ? currentProvider : (res.usedProvider || currentProvider);
+    const actualProvider = res.usedProvider || currentProvider;
 
     const aiReply: Message = {
       id: (Date.now() + 1).toString(),
       sender: 'ai',
-      text: aiResponseText,
-      provider: actualProvider // <-- Provider saved in state here
+      text: res.text,
+      provider: actualProvider
     };
 
     if (currentProvider === 'gemini' && actualProvider === 'local') {

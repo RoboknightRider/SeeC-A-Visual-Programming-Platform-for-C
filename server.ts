@@ -7,14 +7,55 @@ import { spawn, execSync, ChildProcess } from "child_process";
 import fs from "fs";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI } from "@google/genai";
+import {
+  SYSTEM_INSTRUCTION,
+  parseAIRequestPayload,
+  normalizeGeminiApiKey,
+  generateGeminiServerResponse,
+  generateLocalServerResponse,
+} from "./src/services/codingAgent.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+interface ServerConfig {
+  appPort: number;
+  wsPath: string;
+  localAiPort: number;
+}
+
+function getPortFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  const parsed = Number(raw);
+  if (!raw || Number.isNaN(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return parsed;
+}
+
+function loadServerConfig(): ServerConfig {
+  return {
+    appPort: getPortFromEnv("PORT", 3000),
+    wsPath: process.env.WS_PATH?.trim() || "/ws",
+    localAiPort: getPortFromEnv("LOCAL_AI_PORT", 8080),
+  };
+}
+
+const serverConfig = loadServerConfig();
+
+function getLocalAICompletionsEndpoint(config: ServerConfig): string {
+  return `http://127.0.0.1:${config.localAiPort}/v1/chat/completions`;
+}
+
+function createGeminiClient(): GoogleGenAI | null {
+  const apiKey = normalizeGeminiApiKey(process.env.GEMINI_API_KEY);
+  return apiKey ? new GoogleGenAI({ apiKey }) : null;
+}
+
 // ===== Local AI (llama-server) Process Reference =====
 let llamaServerProcess: ChildProcess | null = null;
 
-function startLlamaServer() {
+function startLlamaServer(localAiPort: number) {
   const llamaExecutable = path.join(process.cwd(), "bin", "llama-server.exe");
   const modelPath = path.join(process.cwd(), "models", "seec-tutor.gguf");
 
@@ -31,7 +72,7 @@ function startLlamaServer() {
   console.log("[Local AI] Booting llama-server.exe...");
   llamaServerProcess = spawn(llamaExecutable, [
     "-m", modelPath,
-    "--port", "8080",
+    "--port", String(localAiPort),
     "-c", "2048",
     "--threads", "4"
   ]);
@@ -112,6 +153,14 @@ function sendToClient(event: string, text: string) {
   }
 }
 
+function sendLineStatus(prefix: 'Paused' | 'Waiting for input', line: number | null | undefined) {
+  if (line && line > 0) {
+    sendToClient('Status', `${prefix} at line ${line}`);
+    return;
+  }
+  sendToClient('Status', prefix);
+}
+
 function getGccPath() {
   const localGcc = path.join(process.cwd(), "gcc", "bin", "gcc.exe");
   if (fs.existsSync(localGcc)) {
@@ -124,6 +173,49 @@ function getGccPath() {
   } catch (error) {
     return null;
   }
+}
+
+function requireGccPath() {
+  const gccPath = getGccPath();
+  if (gccPath) {
+    return gccPath;
+  }
+  wsLog('✗ GCC not found');
+  sendToClient('Error', 'GCC not found. Please install GCC or place a portable version in the gcc folder.');
+  return null;
+}
+
+function stopRunningProcess(logMessage?: string) {
+  if (!runningProcess) {
+    return false;
+  }
+  if (logMessage) {
+    wsLog(logMessage);
+  }
+  runningProcess.kill();
+  runningProcess = null;
+  return true;
+}
+
+function attachCompilerDiagnostics(compileProcess: ChildProcess, stdoutLabel: string, stderrLabel: string) {
+  let stdout = '';
+  let stderr = '';
+
+  compileProcess.stdout?.on('data', (data: Buffer) => {
+    const s = data.toString();
+    stdout += s;
+    wsLog(`${stdoutLabel} ${sanitizeDiagnosticText(s)}`);
+  });
+
+  compileProcess.stderr?.on('data', (data: Buffer) => {
+    const s = data.toString();
+    stderr += s;
+    wsLog(`${stderrLabel} ${sanitizeDiagnosticText(s)}`);
+  });
+
+  return {
+    getOutput: () => stderr || stdout,
+  };
 }
 
 function decodeGdbMiString(value: string) {
@@ -282,85 +374,9 @@ function getCodePaths(programName: string) {
   return { cDir, exeDir, cFilename, exeFilename };
 }
 
-function summarizeMessageText(text: string, maxLength = 140) {
-  const normalized = text
-    .replace(/```[\s\S]*?```/g, "[code snippet]")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!normalized) {
-    return "";
-  }
-
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
-}
-
-function buildCompressedContext(messages: Array<{ sender?: string; text?: string }> = []) {
-  const recentMessages = (messages || [])
-    .filter((message) => message?.sender && typeof message.text === "string")
-    .slice(-4);
-
-  if (recentMessages.length === 0) {
-    return "";
-  }
-
-  const compactTurns = recentMessages.map((message) => {
-    const role = message.sender === "user" ? "User" : "Assistant";
-    return `${role}: ${summarizeMessageText(message.text || "", 100)}`;
-  });
-
-  const latestUser = recentMessages.filter((message) => message.sender === "user").slice(-1)[0];
-  const latestAssistant = recentMessages.filter((message) => message.sender === "ai").slice(-1)[0];
-  const errorTurn = recentMessages
-    .filter((message) => message.sender === "user")
-    .find((message) => /\b(error|failed|compilation|debug|warning|syntax|segmentation|exception|terminal)\b/i.test(message.text || ""));
-
-  const contextParts = [`Recent chat summary: ${compactTurns.join(" | ")}`];
-
-  if (latestUser) {
-    contextParts.push(`Latest user intent: ${summarizeMessageText(latestUser.text || "", 120)}`);
-  }
-
-  if (errorTurn) {
-    contextParts.push(`Current issue: ${summarizeMessageText(errorTurn.text || "", 140)}`);
-  }
-
-  if (latestAssistant) {
-    contextParts.push(`Last assistant answer: ${summarizeMessageText(latestAssistant.text || "", 100)}`);
-  }
-
-  return contextParts.join("\n");
-}
-
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
-  const WS_PATH = "/ws";
-
-  // Start Local AI engine process
-  startLlamaServer();
-
-  const SYSTEM_INSTRUCTION = `
-You are an expert, friendly computer science tutor integrated into a visual web application. Your purpose is to explain C programming concepts and guide users.
-
-CRITICAL FORMATTING & LENGTH RULES:
-1. NEVER use headers, markdown titles, emojis, lists, or structured sections.
-2. Write exactly one or two conversational sentences explaining what the error is and how to fix it.
-3. Use a casual, direct tone—like a helpful peer speaking to a friend.
-4. Keep the response under 30 words total.
-`;
-
-  const getGeminiClient = () => {
-    const rawKey = process.env.GEMINI_API_KEY?.trim();
-    const normalizedKey = rawKey?.replace(/^['"]|['"]$/g, "");
-    return normalizedKey ? new GoogleGenAI({ apiKey: normalizedKey }) : null;
-  };
-
-  app.use(express.json());
-
+function registerAIRoutes(app: express.Express, config: ServerConfig, geminiClient: GoogleGenAI | null) {
   app.get("/api/ai-status", (_req, res) => {
-    const geminiConfigured = Boolean(getGeminiClient());
+    const geminiConfigured = Boolean(geminiClient);
     const local = getLocalAIStatus();
 
     res.json({
@@ -369,20 +385,12 @@ CRITICAL FORMATTING & LENGTH RULES:
     });
   });
 
-  // ===== Existing Online Gemini Route =====
   app.post("/api/gemini", async (req, res) => {
-    const { prompt, messages, systemInstruction } = req.body as {
-      prompt?: string;
-      messages?: Array<{ sender?: string; text?: string }>;
-      systemInstruction?: string;
-    };
-
-    if (!prompt || typeof prompt !== "string") {
-      res.status(400).json({ error: "A prompt is required." });
+    const payload = parseAIRequestPayload(req.body);
+    if ("error" in payload) {
+      res.status(400).json({ error: payload.error });
       return;
     }
-
-    const geminiClient = getGeminiClient();
 
     if (!geminiClient) {
       console.error("Gemini configuration missing.");
@@ -391,117 +399,81 @@ CRITICAL FORMATTING & LENGTH RULES:
     }
 
     try {
-      const compactContext = buildCompressedContext(messages);
-      const contents = compactContext
-        ? `${compactContext}\n\nCurrent user message: ${prompt}`
-        : prompt;
-
-      const response = await geminiClient.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents,
-        config: {
-          systemInstruction: systemInstruction || SYSTEM_INSTRUCTION,
-        },
-      });
-
-      res.json({ text: response.text || "No response received." });
+      const text = await generateGeminiServerResponse(
+        geminiClient,
+        payload.prompt,
+        payload.messages,
+        payload.systemInstruction || SYSTEM_INSTRUCTION
+      );
+      res.json({ text });
     } catch (error) {
       console.error("Gemini API Error:", error);
-      res.status(502).json({ error: "Error connecting to Gemini API." });
+      const detail = error instanceof Error && error.message.trim()
+        ? error.message
+        : "Error connecting to Gemini API.";
+      res.status(502).json({ error: detail });
     }
   });
 
-  // ===== Offline Local AI Route =====
   app.post("/api/local-ai", async (req, res) => {
-    const { prompt, messages, systemInstruction } = req.body as {
-      prompt?: string;
-      messages?: Array<{ sender?: string; text?: string }>;
-      systemInstruction?: string;
-    };
-
-    if (!prompt || typeof prompt !== "string") {
-      res.status(400).json({ error: "A prompt is required." });
+    const payload = parseAIRequestPayload(req.body);
+    if ("error" in payload) {
+      res.status(400).json({ error: payload.error });
       return;
     }
 
     try {
-      const compactContext = buildCompressedContext(messages);
-      const fullPrompt = compactContext
-        ? `${compactContext}\nUser: ${prompt}`
-        : prompt;
-
-      // Construct OpenAI-compatible payload for llama-server
-      const formattedMessages = [
-        // System instruction passed from gemini.ts (or default fallback)
-        { role: "system", content: systemInstruction || SYSTEM_INSTRUCTION },
-        ...((messages || [])
-          .filter((m) => m?.sender && typeof m.text === "string")
-          .map((m) => ({
-            role: m.sender === "user" ? "user" : "assistant",
-            content: m.text || "",
-          }))),
-        { role: "user", content: fullPrompt }
-      ];
-
-      const localResponse = await fetch("http://127.0.0.1:8080/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: formattedMessages,
-          temperature: 0.1,
-          max_tokens: 150, // Increased slightly to give room for short error bullet points
-          stop: ["User:", "Assistant:", "Explanation:", "\n\n\n"]
-        })
-      });
-
-      const data = await localResponse.json();
-      const text = data.choices?.[0]?.message?.content || "No local response generated.";
+      const text = await generateLocalServerResponse(
+        payload.prompt,
+        payload.messages,
+        getLocalAICompletionsEndpoint(config),
+        payload.systemInstruction
+      );
       res.json({ text });
     } catch (error) {
       console.error("Local AI Endpoint Error:", error);
       res.status(503).json({ error: "Local AI model server is offline or busy." });
     }
   });
+}
 
+async function setupFrontend(app: express.Express) {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
-    app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
-    });
+    return;
   }
 
-  // ===== Start HTTP Server =====
-  const httpServer = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[HTTP] Server running on http://localhost:${PORT}`);
+  app.use(express.static(path.join(__dirname, "dist")));
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(__dirname, "dist", "index.html"));
   });
+}
 
-  // ===== Initialize WebSocket Server =====
-  const wss = new WebSocketServer({ server: httpServer, path: WS_PATH });
-  wsLog(`WebSocket server initialized on ws://localhost:${PORT}${WS_PATH}`);
+function setupWebSocketServer(httpServer: ReturnType<express.Express["listen"]>, wsPath: string) {
+  const wss = new WebSocketServer({ server: httpServer, path: wsPath });
+  wsLog(`WebSocket server initialized on ws://localhost:${serverConfig.appPort}${wsPath}`);
 
-  wss.on('connection', (ws: WebSocket) => {
-    wsLog('✓ Client connected');
+  wss.on("connection", (ws: WebSocket) => {
+    wsLog("✓ Client connected");
     wsClient = ws;
 
-    ws.on('message', (message: Buffer) => {
+    ws.on("message", (message: Buffer) => {
       try {
         const event = JSON.parse(message.toString()) as WebSocketMessage;
         wsLog(`Received action: ${event.action}`);
 
         switch (event.action) {
-          case 'RUN_CODE': {handleRunCode(ws, event.data || '');break;}
-          case 'DEBUG': {handleDebug(ws, event.data || '');break;}
-          case 'DEBUG_STEP_OVER': {handleDebugStepOver(ws);break;}
-          case 'DEBUG_STEP_INTO': {handleDebugStepInto(ws);break;}
-          case 'DEBUG_STEP_OUT': {handleDebugStepOut(ws);break;}
-          case 'SEND_INPUT': {handleSendInput(event.data || '');break;}
-          case 'STOP_EXECUTION': {handleStopExecution();break;}
+          case "RUN_CODE": {handleRunCode(event.data || "");break;}
+          case "DEBUG": {handleDebug(event.data || "");break;}
+          case "DEBUG_STEP_OVER": {handleDebugStepOver();break;}
+          case "DEBUG_STEP_INTO": {handleDebugStepInto();break;}
+          case "DEBUG_STEP_OUT": {handleDebugStepOut();break;}
+          case "SEND_INPUT": {handleSendInput(event.data || "");break;}
+          case "STOP_EXECUTION": {handleStopExecution();break;}
           default: {wsLog(`⚠ Unknown action: ${event.action}`);}
         }
       } catch (error) {
@@ -509,40 +481,58 @@ CRITICAL FORMATTING & LENGTH RULES:
       }
     });
 
-    ws.on('close', () => {
-      wsLog('✓ Client disconnected');
-      if (runningProcess) {
-        wsLog('Killing running process on client disconnect...');
-        runningProcess.kill();
-        runningProcess = null;
-      }
+    ws.on("close", () => {
+      wsLog("✓ Client disconnected");
+      stopRunningProcess("Killing running process on client disconnect...");
       if (activeDebugSession) {
-        wsLog('Cleaning up debug session on client disconnect...');
+        wsLog("Cleaning up debug session on client disconnect...");
         cleanActiveGdbSession();
       }
       wsClient = null;
     });
 
-    ws.on('error', (error) => {
+    ws.on("error", (error) => {
       wsLog(`✗ WebSocket error: ${error.message}`);
     });
   });
 
-  // ===== Graceful Shutdown =====
-  process.on('SIGINT', () => {
-    wsLog('SIGINT received, shutting down gracefully...');
+  return wss;
+}
+
+function registerShutdownHandlers(httpServer: any, wss: WebSocketServer) {
+  process.on("SIGINT", () => {
+    wsLog("SIGINT received, shutting down gracefully...");
     gracefulShutdown(httpServer, wss);
   });
 
-  process.on('SIGTERM', () => {
-    wsLog('SIGTERM received, shutting down gracefully...');
+  process.on("SIGTERM", () => {
+    wsLog("SIGTERM received, shutting down gracefully...");
     gracefulShutdown(httpServer, wss);
   });
 
-  process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
+  process.on("uncaughtException", (error) => {
+    console.error("Uncaught Exception:", error);
     gracefulShutdown(httpServer, wss);
   });
+}
+
+async function startServer() {
+  const app = express();
+  const { appPort, wsPath, localAiPort } = serverConfig;
+  const geminiClient = createGeminiClient();
+
+  startLlamaServer(localAiPort);
+
+  app.use(express.json());
+  registerAIRoutes(app, serverConfig, geminiClient);
+  await setupFrontend(app);
+
+  const httpServer = app.listen(appPort, "0.0.0.0", () => {
+    console.log(`[HTTP] Server running on http://localhost:${appPort}`);
+  });
+
+  const wss = setupWebSocketServer(httpServer, wsPath);
+  registerShutdownHandlers(httpServer, wss);
 }
 
 function gracefulShutdown(httpServer: any, wss: WebSocketServer) {
@@ -569,12 +559,7 @@ function gracefulShutdown(httpServer: any, wss: WebSocketServer) {
   wsLog('Closing HTTP server...');
   httpServer.close(() => {
     wsLog('✓ HTTP server closed');
-    
-    if (runningProcess) {
-      wsLog('Killing running process...');
-      runningProcess.kill();
-      runningProcess = null;
-    }
+    stopRunningProcess('Killing running process...');
     
     if (activeDebugSession) {
       wsLog('Killing debug session...');
@@ -597,19 +582,13 @@ startServer().catch((error) => {
 
 // ===== WebSocket Action Handlers =====
 
-function handleRunCode(ws: WebSocket, codeString: string) {
+function handleRunCode(codeString: string) {
   wsLog('Processing RUN_CODE...');
 
-  if (runningProcess) {
-    wsLog('Killing existing process...');
-    runningProcess.kill();
-    runningProcess = null;
-  }
+  stopRunningProcess('Killing existing process...');
 
-  const gccPath = getGccPath();
+  const gccPath = requireGccPath();
   if (!gccPath) {
-    wsLog('✗ GCC not found');
-    sendToClient('Error', 'GCC not found. Please install GCC or place a portable version in the gcc folder.');
     return;
   }
 
@@ -633,25 +612,12 @@ function handleRunCode(ws: WebSocket, codeString: string) {
 
     wsLog('Compiling C code...');
     const compileProcess = spawn(gccPath, [cFilename, '-o', exeFilename]);
-    let compileStderr = '';
-    let compileStdout = '';
-
-    compileProcess.stdout?.on('data', (data: Buffer) => {
-      const s = data.toString();
-      compileStdout += s;
-      wsLog(`[compiler stdout] ${sanitizeDiagnosticText(s)}`);
-    });
-
-    compileProcess.stderr?.on('data', (data: Buffer) => {
-      const s = data.toString();
-      compileStderr += s;
-      wsLog(`[compiler stderr] ${sanitizeDiagnosticText(s)}`);
-    });
+    const compilerLogs = attachCompilerDiagnostics(compileProcess, '[compiler stdout]', '[compiler stderr]');
 
     compileProcess.on('close', (exitCode) => {
       if (exitCode !== 0) {
         wsLog(`✗ Compilation failed with code ${exitCode}`);
-        sendToClient('Error', `Compilation error:\n${sanitizeDiagnosticText(compileStderr || compileStdout)}`);
+        sendToClient('Error', `Compilation error:\n${sanitizeDiagnosticText(compilerLogs.getOutput())}`);
         return;
       }
 
@@ -739,10 +705,7 @@ function handleStopExecution() {
     return;
   }
 
-  if (runningProcess) {
-    wsLog('Terminating running process...');
-    runningProcess.kill();
-    runningProcess = null;
+  if (stopRunningProcess('Terminating running process...')) {
     sendToClient('Status', 'Execution stopped by user.');
     return;
   }
@@ -750,15 +713,13 @@ function handleStopExecution() {
   wsLog('⚠ No active run/debug session to stop');
 }
 
-function handleDebug(ws: WebSocket, codeString: string) {
+function handleDebug(codeString: string) {
   wsLog('Processing DEBUG...');
 
   cleanActiveGdbSession();
 
-  const gccPath = getGccPath();
+  const gccPath = requireGccPath();
   if (!gccPath) {
-    wsLog('✗ GCC not found');
-    sendToClient('Error', 'GCC not found. Please install GCC or place a portable version in the gcc folder.');
     return;
   }
 
@@ -775,26 +736,12 @@ function handleDebug(ws: WebSocket, codeString: string) {
     wsLog(`Wrote debug code to ${path.basename(cFilename)}`);
 
     const compileProcess = spawn(gccPath, ['-g', '-O0', '-Wall', '-Wextra', cFilename, '-o', exeFilename]);
-
-    let compileStdout = '';
-    let compileStderr = '';
-
-    compileProcess.stdout?.on('data', (data) => {
-      const s = data.toString();
-      compileStdout += s;
-      wsLog(`[DEBUG compiler stdout] ${sanitizeDiagnosticText(s)}`);
-    });
-
-    compileProcess.stderr?.on('data', (data) => {
-      const s = data.toString();
-      compileStderr += s;
-      wsLog(`[DEBUG compiler stderr] ${sanitizeDiagnosticText(s)}`);
-    });
+    const compilerLogs = attachCompilerDiagnostics(compileProcess, '[DEBUG compiler stdout]', '[DEBUG compiler stderr]');
 
     compileProcess.on('close', (exitCode) => {
       if (exitCode !== 0) {
         wsLog(`✗ Debug compilation failed with code ${exitCode}`);
-        sendToClient('Error', `Debug compilation error:\n${sanitizeDiagnosticText(compileStderr || compileStdout)}`);
+        sendToClient('Error', `Debug compilation error:\n${sanitizeDiagnosticText(compilerLogs.getOutput())}`);
         return;
       }
 
@@ -852,7 +799,7 @@ function handleDebug(ws: WebSocket, codeString: string) {
           clearInterval(waitForInitial);
           
           wsLog(`✓ GDB paused at line ${session.currentLine}`);
-          sendToClient('Status', `Paused at line ${session.currentLine}`);
+          sendLineStatus('Paused', session.currentLine);
         }
       }, 50);
 
@@ -881,7 +828,7 @@ function handleDebug(ws: WebSocket, codeString: string) {
   }
 }
 
-function handleDebugStep(ws: WebSocket, mode: "over" | "into" | "out") {
+function handleDebugStep(mode: "over" | "into" | "out") {
   const actionName = mode === "over" ? "DEBUG_STEP_OVER" : mode === "into" ? "DEBUG_STEP_INTO" : "DEBUG_STEP_OUT";
   const modeLabel = mode === "over" ? "Step over" : mode === "into" ? "Step into" : "Step out";
   const gdbCommand = mode === "over" ? "-exec-next\n" : mode === "into" ? "-exec-step\n" : "-exec-finish\n";
@@ -902,11 +849,7 @@ function handleDebugStep(ws: WebSocket, mode: "over" | "into" | "out") {
 
   if (session.waitingForInput) {
     wsLog(`⚠ ${modeLabel} is waiting for input and cannot advance until input is sent`);
-    if (session.currentLine && session.currentLine > 0) {
-      sendToClient('Status', `Waiting for input at line ${session.currentLine}`);
-    } else {
-      sendToClient('Status', 'Waiting for input');
-    }
+    sendLineStatus('Waiting for input', session.currentLine);
     return;
   }
 
@@ -918,12 +861,16 @@ function handleDebugStep(ws: WebSocket, mode: "over" | "into" | "out") {
 
   session.gdbProcess.stdin?.write(gdbCommand);
 
-  if (session.stepPoll) {
-    clearInterval(session.stepPoll);
-  }
+  const clearStepPoll = () => {
+    if (session.stepPoll) {
+      clearInterval(session.stepPoll);
+      session.stepPoll = null;
+    }
+  };
+
+  clearStepPoll();
 
   session.stepPoll = setInterval(() => {
-    const hasProgramOutput = session.programStdout.length > session.lastStdoutIndex || session.programStderr.length > session.lastStderrIndex;
     const hasLineChange = session.currentLine !== previousLine;
     const isComplete = session.completed;
     const elapsed = Date.now() - startedAt;
@@ -933,34 +880,20 @@ function handleDebugStep(ws: WebSocket, mode: "over" | "into" | "out") {
       if (isLikelyInputLine(session, currentLine)) {
         session.waitingForInput = true;
         wsLog('ℹ Debugger waiting for program input');
-        if (currentLine && currentLine > 0) {
-          sendToClient('Status', `Waiting for input at line ${currentLine}`);
-        } else {
-          sendToClient('Status', 'Waiting for input');
-        }
+        sendLineStatus('Waiting for input', currentLine);
         return;
       }
 
-      if (session.stepPoll) {
-        clearInterval(session.stepPoll);
-        session.stepPoll = null;
-      }
+      clearStepPoll();
       session.stepInProgress = false;
       session.waitingForInput = false;
       wsLog('ℹ Step timeout on non-input line; returning to paused state');
-      if (currentLine && currentLine > 0) {
-        sendToClient('Status', `Paused at line ${currentLine}`);
-      } else {
-        sendToClient('Status', 'Paused');
-      }
+      sendLineStatus('Paused', currentLine);
       return;
     }
 
     if (hasLineChange || isComplete) {
-      if (session.stepPoll) {
-        clearInterval(session.stepPoll);
-        session.stepPoll = null;
-      }
+      clearStepPoll();
       session.stepInProgress = false;
       session.waitingForInput = false;
 
@@ -970,21 +903,14 @@ function handleDebugStep(ws: WebSocket, mode: "over" | "into" | "out") {
         sendToClient('Status', `Debug process exited with code ${session.exitCode}`);
       } else {
         wsLog(`✓ GDB stepped to line ${session.currentLine}`);
-        if (session.currentLine && session.currentLine > 0) {
-          sendToClient('Status', `Paused at line ${session.currentLine}`);
-        } else {
-          sendToClient('Status', 'Paused');
-        }
+        sendLineStatus('Paused', session.currentLine);
       }
 
       return;
     }
 
     if (!hasLineChange && session.completed) {
-      if (session.stepPoll) {
-        clearInterval(session.stepPoll);
-        session.stepPoll = null;
-      }
+      clearStepPoll();
       session.stepInProgress = false;
       session.waitingForInput = false;
       wsLog('✓ Debug completion detected without line change');
@@ -994,14 +920,14 @@ function handleDebugStep(ws: WebSocket, mode: "over" | "into" | "out") {
   }, 50);
 }
 
-function handleDebugStepOver(ws: WebSocket) {
-  handleDebugStep(ws, "over");
+function handleDebugStepOver() {
+  handleDebugStep("over");
 }
 
-function handleDebugStepInto(ws: WebSocket) {
-  handleDebugStep(ws, "into");
+function handleDebugStepInto() {
+  handleDebugStep("into");
 }
 
-function handleDebugStepOut(ws: WebSocket) {
-  handleDebugStep(ws, "out");
+function handleDebugStepOut() {
+  handleDebugStep("out");
 }

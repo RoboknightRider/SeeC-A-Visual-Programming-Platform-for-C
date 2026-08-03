@@ -99,117 +99,63 @@ export function useGlobalTerminal(
     };
   }, [connect]);
 
-  // Send RUN_CODE action
-  const runCode = useCallback((codeString: string) => {
+  type WsAction =
+    | 'RUN_CODE'
+    | 'DEBUG'
+    | 'DEBUG_STEP_OVER'
+    | 'DEBUG_STEP_INTO'
+    | 'DEBUG_STEP_OUT'
+    | 'SEND_INPUT'
+    | 'STOP_EXECUTION';
+
+  const sendAction = useCallback((action: WsAction, data?: string, successDetail?: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      debugLog('⚠ WebSocket not connected, cannot send RUN_CODE');
+      debugLog(`⚠ WebSocket not connected, cannot send ${action}`);
       return;
     }
 
     try {
-      const message = JSON.stringify({ action: 'RUN_CODE', data: codeString });
-      wsRef.current.send(message);
-      debugLog('✓ RUN_CODE sent');
+      wsRef.current.send(JSON.stringify({ action, data }));
+      debugLog(successDetail || `✓ ${action} sent`);
     } catch (error) {
-      debugLog(`✗ Error sending RUN_CODE: ${error instanceof Error ? error.message : String(error)}`);
+      debugLog(`✗ Error sending ${action}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [debugLog]);
+
+  // Send RUN_CODE action
+  const runCode = useCallback((codeString: string) => {
+    sendAction('RUN_CODE', codeString);
+  }, [sendAction]);
 
   // Send DEBUG action
   const startDebug = useCallback((codeString: string) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      debugLog('⚠ WebSocket not connected, cannot send DEBUG');
-      return;
-    }
-
-    try {
-      const message = JSON.stringify({ action: 'DEBUG', data: codeString });
-      wsRef.current.send(message);
-      debugLog('✓ DEBUG sent');
-    } catch (error) {
-      debugLog(`✗ Error sending DEBUG: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, [debugLog]);
+    sendAction('DEBUG', codeString);
+  }, [sendAction]);
 
   // Send DEBUG_STEP_OVER action
   const debugStepOver = useCallback(() => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      debugLog('⚠ WebSocket not connected, cannot send DEBUG_STEP_OVER');
-      return;
-    }
-
-    try {
-      const message = JSON.stringify({ action: 'DEBUG_STEP_OVER' });
-      wsRef.current.send(message);
-      debugLog('✓ DEBUG_STEP_OVER sent');
-    } catch (error) {
-      debugLog(`✗ Error sending DEBUG_STEP_OVER: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, [debugLog]);
+    sendAction('DEBUG_STEP_OVER');
+  }, [sendAction]);
 
   // Send DEBUG_STEP_INTO action
   const debugStepInto = useCallback(() => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      debugLog('⚠ WebSocket not connected, cannot send DEBUG_STEP_INTO');
-      return;
-    }
-
-    try {
-      const message = JSON.stringify({ action: 'DEBUG_STEP_INTO' });
-      wsRef.current.send(message);
-      debugLog('✓ DEBUG_STEP_INTO sent');
-    } catch (error) {
-      debugLog(`✗ Error sending DEBUG_STEP_INTO: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, [debugLog]);
+    sendAction('DEBUG_STEP_INTO');
+  }, [sendAction]);
 
   // Send DEBUG_STEP_OUT action
   const debugStepOut = useCallback(() => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      debugLog('⚠ WebSocket not connected, cannot send DEBUG_STEP_OUT');
-      return;
-    }
-
-    try {
-      const message = JSON.stringify({ action: 'DEBUG_STEP_OUT' });
-      wsRef.current.send(message);
-      debugLog('✓ DEBUG_STEP_OUT sent');
-    } catch (error) {
-      debugLog(`✗ Error sending DEBUG_STEP_OUT: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, [debugLog]);
+    sendAction('DEBUG_STEP_OUT');
+  }, [sendAction]);
 
   // Send SEND_INPUT action
   const sendInput = useCallback((text: string) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      debugLog('⚠ WebSocket not connected, cannot send input');
-      return;
-    }
-
-    try {
-      const message = JSON.stringify({ action: 'SEND_INPUT', data: text });
-      wsRef.current.send(message);
-      debugLog(`✓ Input sent: ${text}`);
-    } catch (error) {
-      debugLog(`✗ Error sending input: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, [debugLog]);
+    sendAction('SEND_INPUT', text, `✓ Input sent: ${text}`);
+  }, [sendAction]);
 
   // Send STOP_EXECUTION action
   const stopExecution = useCallback(() => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      debugLog('⚠ WebSocket not connected, cannot stop execution');
-      return;
-    }
-
-    try {
-      const message = JSON.stringify({ action: 'STOP_EXECUTION' });
-      wsRef.current.send(message);
-      debugLog('✓ STOP_EXECUTION sent');
-    } catch (error) {
-      debugLog(`✗ Error sending STOP_EXECUTION: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }, [debugLog]);
+    sendAction('STOP_EXECUTION');
+  }, [sendAction]);
 
   const isConnected = wsRef.current?.readyState === WebSocket.OPEN;
 

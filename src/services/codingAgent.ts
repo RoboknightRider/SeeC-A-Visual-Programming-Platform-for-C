@@ -1,8 +1,50 @@
 export type AIProvider = 'gemini' | 'local';
 
+export interface ChatMessage {
+  sender?: 'user' | 'ai' | string;
+  text?: string;
+}
+
+interface AIRequestPayload {
+  prompt?: string;
+  messages?: Array<{ sender?: string; text?: string }>;
+  systemInstruction?: string;
+}
+
+interface ParsedAIRequestPayload {
+  prompt: string;
+  messages?: Array<{ sender?: string; text?: string }>;
+  systemInstruction?: string;
+}
+
+interface GeminiServerClient {
+  models: {
+    generateContent: (args: {
+      model: string;
+      contents: string;
+      config: { systemInstruction: string };
+    }) => Promise<{ text?: string }>;
+  };
+}
+
 export interface AIResponse {
   text: string;
   usedProvider: AIProvider;
+}
+
+export function normalizeGeminiApiKey(rawKey?: string): string | null {
+  const key = rawKey?.trim();
+  const normalizedKey = key?.replace(/^['"]|['"]$/g, '');
+  return normalizedKey || null;
+}
+
+export function parseAIRequestPayload(body: AIRequestPayload): ParsedAIRequestPayload | { error: string } {
+  const { prompt, messages, systemInstruction } = body;
+  if (!prompt || typeof prompt !== 'string') {
+    return { error: 'A prompt is required.' };
+  }
+
+  return { prompt, messages, systemInstruction };
 }
 
 function buildFallbackNotice(reason: string): string {
@@ -18,20 +60,61 @@ function getGeminiFailureReason(status: number, apiError?: string): string {
   return `request failed with status ${status}`;
 }
 
-export const SYSTEM_INSTRUCTION = `
-You are SeeC Tutor, a practical C programming assistant.
+export const SYSTEM_INSTRUCTION = `You are SeeC Tutor, a practical C programming assistant focused on C programming and computer science.`;
 
-Rules:
-1. Focus on C programming and computer science.
-2. If the user asks for an example, provide correct, compilable C code in a fenced code block.
-3. If the user provides a compiler/runtime error, explain the likely cause and show a fixed code snippet.
-4. Keep explanations concise and actionable.
-5. Never output meta labels like "Error Type", "Explanation", "User", or "Assistant".
-`;
+export async function generateGeminiServerResponse(
+  geminiClient: GeminiServerClient,
+  prompt: string,
+  _messages: ChatMessage[] = [],
+  systemInstruction: string = SYSTEM_INSTRUCTION
+): Promise<string> {
+  const response = await geminiClient.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: prompt,
+    config: {
+      systemInstruction,
+    },
+  });
+
+  return response.text || 'No response received.';
+}
+
+export async function generateLocalServerResponse(
+  prompt: string,
+  messages: ChatMessage[] = [],
+  endpoint: string,
+  systemInstruction?: string
+): Promise<string> {
+  const formattedMessages = [
+    ...(systemInstruction?.trim() ? [{ role: 'system' as const, content: systemInstruction }] : []),
+    ...(messages || [])
+      .filter((message) => message?.sender && typeof message.text === 'string')
+      .map((message) => ({
+        role: message.sender === 'user' ? 'user' : 'assistant',
+        content: message.text || '',
+      })) as Array<{ role: 'user' | 'assistant'; content: string }>,
+    { role: 'user' as const, content: prompt },
+  ];
+
+  const localResponse = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messages: formattedMessages,
+    }),
+  });
+
+  if (!localResponse.ok) {
+    throw new Error(`Local AI request failed with status ${localResponse.status}`);
+  }
+
+  const data = await localResponse.json();
+  return data.choices?.[0]?.message?.content || 'No local response generated.';
+}
 
 export async function askLocalAI(
   prompt: string,
-  messages: Array<{ sender?: string; text?: string }> = [],
+  messages: ChatMessage[] = [],
   systemInstruction?: string
 ): Promise<string> {
   try {
@@ -41,7 +124,7 @@ export async function askLocalAI(
       body: JSON.stringify({
         prompt,
         messages,
-        systemInstruction: systemInstruction || SYSTEM_INSTRUCTION,
+        systemInstruction,
       }),
     });
 
@@ -66,11 +149,31 @@ export async function askGemini(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, messages, systemInstruction: SYSTEM_INSTRUCTION }),
     });
+    const raw = await response.text();
+    let data: Record<string, unknown> = {};
+    if (raw.trim()) {
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === 'object') {
+          data = parsed as Record<string, unknown>;
+        } else {
+          data = { error: raw };
+        }
+      } catch {
+        data = { error: raw };
+      }
+    }
 
-    const data = (await response.json()) as { text?: string; error?: string };
+    const text = typeof data.text === 'string' ? data.text : undefined;
+    const directError = typeof data.error === 'string' ? data.error : undefined;
+    const nestedError = data.error && typeof data.error === 'object'
+      ? (data.error as Record<string, unknown>).message
+      : undefined;
+    const messageError = typeof data.message === 'string' ? data.message : undefined;
+    const apiError = directError || (typeof nestedError === 'string' ? nestedError : undefined) || messageError;
 
     if (!response.ok) {
-      const reason = getGeminiFailureReason(response.status, data.error);
+      const reason = getGeminiFailureReason(response.status, apiError);
       const fallbackText = await askLocalAI(prompt, messages, SYSTEM_INSTRUCTION);
       return {
         text: `${buildFallbackNotice(reason)}\n\n${fallbackText}`,
@@ -78,7 +181,7 @@ export async function askGemini(
       };
     }
 
-    return { text: data.text || 'No response received.', usedProvider: 'gemini' };
+    return { text: text || 'No response received.', usedProvider: 'gemini' };
   } catch (error) {
     const reason = typeof navigator !== 'undefined' && navigator.onLine === false
       ? 'internet appears to be offline'
@@ -97,7 +200,7 @@ export async function askAI(
   provider: AIProvider = 'gemini'
 ): Promise<AIResponse> {
   if (provider === 'local') {
-    const text = await askLocalAI(prompt, messages, SYSTEM_INSTRUCTION);
+    const text = await askLocalAI(prompt, messages);
     return { text, usedProvider: 'local' };
   }
 
