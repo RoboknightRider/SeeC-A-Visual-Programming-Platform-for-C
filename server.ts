@@ -77,12 +77,14 @@ function startLlamaServer(localAiPort: number) {
     "--threads", "4"
   ]);
 
-  llamaServerProcess.stdout?.on("data", (data) => {
-    console.log(`[llama-server]: ${data.toString().trim()}`);
-  });
+  // Avoid logging every stdout/stderr chunk from the model server to reduce console spam.
+  // Only surface critical lifecycle events and errors.
+  if (llamaServerProcess.pid) {
+    console.log(`[Local AI] llama-server started (pid ${llamaServerProcess.pid})`);
+  }
 
-  llamaServerProcess.stderr?.on("data", (data) => {
-    console.log(`[llama-server err]: ${data.toString().trim()}`);
+  llamaServerProcess.on('error', (err) => {
+    console.error('[Local AI] llama-server process error:', err?.message || err);
   });
 
   llamaServerProcess.on("close", (code) => {
@@ -124,16 +126,22 @@ interface DebugSession {
   sourceLines: string[];
 }
 
-let activeDebugSession: DebugSession | null = null;
+interface ClientSession {
+  id: string;
+  ws: WebSocket;
+  runningProcess: ChildProcess | null;
+  activeDebugSession: DebugSession | null;
+  cDir: string;
+  exeDir: string;
+}
+
+const clientSessions = new Map<WebSocket, ClientSession>();
 
 // ===== WebSocket Global State =====
 interface WebSocketMessage {
   action: 'RUN_CODE' | 'DEBUG' | 'DEBUG_STEP_OVER' | 'DEBUG_STEP_INTO' | 'DEBUG_STEP_OUT' | 'SEND_INPUT' | 'STOP_EXECUTION';
   data?: string;
 }
-
-let runningProcess: ChildProcess | null = null;
-let wsClient: WebSocket | null = null;
 
 // Debug logging helper
 function wsLog(message: string) {
@@ -147,18 +155,18 @@ function sanitizeDiagnosticText(text: string) {
     .replace(/(^|\s)\/[^:\r\n]*\/([^\/:\r\n]+\.(?:c|h|cpp|cc|cxx|exe))(?=:\d|:\s|$)/g, (_, prefix: string, fileName: string) => `${prefix}${fileName}`);
 }
 
-function sendToClient(event: string, text: string) {
-  if (wsClient && wsClient.readyState === WebSocket.OPEN) {
-    wsClient.send(JSON.stringify({ event, text }));
+function sendToClient(ws: WebSocket, event: string, text: string) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ event, text }));
   }
 }
 
-function sendLineStatus(prefix: 'Paused' | 'Waiting for input', line: number | null | undefined) {
+function sendLineStatus(ws: WebSocket, prefix: 'Paused' | 'Waiting for input', line: number | null | undefined) {
   if (line && line > 0) {
-    sendToClient('Status', `${prefix} at line ${line}`);
+    sendToClient(ws, 'Status', `${prefix} at line ${line}`);
     return;
   }
-  sendToClient('Status', prefix);
+  sendToClient(ws, 'Status', prefix);
 }
 
 function getGccPath() {
@@ -175,25 +183,27 @@ function getGccPath() {
   }
 }
 
-function requireGccPath() {
+function requireGccPath(ws: WebSocket | null) {
   const gccPath = getGccPath();
   if (gccPath) {
     return gccPath;
   }
   wsLog('✗ GCC not found');
-  sendToClient('Error', 'GCC not found. Please install GCC or place a portable version in the gcc folder.');
+  if (ws) {
+    sendToClient(ws, 'Error', 'GCC not found. Please install GCC or place a portable version in the gcc folder.');
+  }
   return null;
 }
 
-function stopRunningProcess(logMessage?: string) {
-  if (!runningProcess) {
+function stopRunningProcess(session: ClientSession, logMessage?: string) {
+  if (!session.runningProcess) {
     return false;
   }
   if (logMessage) {
     wsLog(logMessage);
   }
-  runningProcess.kill();
-  runningProcess = null;
+  session.runningProcess.kill();
+  session.runningProcess = null;
   return true;
 }
 
@@ -309,17 +319,17 @@ function processGdbMiChunk(session: DebugSession, chunk: string, stream: "stdout
   }
 }
 
-function flushDebugOutput(session: DebugSession) {
+function flushDebugOutput(session: DebugSession, ws: WebSocket) {
   if (session.programStdout.length > session.lastStdoutIndex) {
     const out = session.programStdout.slice(session.lastStdoutIndex);
     session.lastStdoutIndex = session.programStdout.length;
-    if (out) sendToClient('Outputs', out);
+    if (out) sendToClient(ws, 'Outputs', out);
   }
 
   if (session.programStderr.length > session.lastStderrIndex) {
     const err = sanitizeDiagnosticText(session.programStderr.slice(session.lastStderrIndex));
     session.lastStderrIndex = session.programStderr.length;
-    if (err) sendToClient('Error', err);
+    if (err) sendToClient(ws, 'Error', err);
   }
 }
 
@@ -332,46 +342,35 @@ function isLikelyInputLine(session: DebugSession, lineNumber: number | null) {
   return /\b(scanf|fscanf|sscanf|gets|fgets|getchar|getc|fgetc)\b/.test(sourceLine);
 }
 
-function cleanActiveGdbSession() {
-  if (!activeDebugSession) {
+function cleanActiveGdbSession(session: ClientSession) {
+  if (!session.activeDebugSession) {
     return;
   }
 
-  if (activeDebugSession.stepPoll) {
-    clearInterval(activeDebugSession.stepPoll);
-    activeDebugSession.stepPoll = null;
+  if (session.activeDebugSession.stepPoll) {
+    clearInterval(session.activeDebugSession.stepPoll);
+    session.activeDebugSession.stepPoll = null;
   }
 
   try {
-    activeDebugSession.gdbProcess.stdin?.write("-gdb-exit\n");
-    activeDebugSession.gdbProcess.kill();
+    session.activeDebugSession.gdbProcess.stdin?.write("-gdb-exit\n");
+    session.activeDebugSession.gdbProcess.kill();
   } catch (error) {
     console.error("Error cleaning up GDB process:", error);
   } finally {
-    activeDebugSession = null;
+    session.activeDebugSession = null;
   }
 }
 
-function ensureCodeDirectories() {
-  const cDir = path.join(process.cwd(), "C_Source");
-  const exeDir = path.join(process.cwd(), "C_Build");
-
-  if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
-  if (!fs.existsSync(exeDir)) fs.mkdirSync(exeDir, { recursive: true });
-
-  return { cDir, exeDir };
-}
-
-function getCodePaths(programName: string) {
-  const { cDir, exeDir } = ensureCodeDirectories();
-  const cFilename = path.join(cDir, `${programName}.c`);
-  let exeFilename = path.join(exeDir, programName);
+function getCodePaths(session: ClientSession, programName: string) {
+  const cFilename = path.join(session.cDir, `${programName}.c`);
+  let exeFilename = path.join(session.exeDir, programName);
 
   if (process.platform === "win32") {
     exeFilename += ".exe";
   }
 
-  return { cDir, exeDir, cFilename, exeFilename };
+  return { cDir: session.cDir, exeDir: session.exeDir, cFilename, exeFilename };
 }
 
 function registerAIRoutes(app: express.Express, config: ServerConfig, geminiClient: GoogleGenAI | null) {
@@ -403,7 +402,8 @@ function registerAIRoutes(app: express.Express, config: ServerConfig, geminiClie
         geminiClient,
         payload.prompt,
         payload.messages,
-        payload.systemInstruction || SYSTEM_INSTRUCTION
+        payload.systemInstruction || SYSTEM_INSTRUCTION,
+        payload.contextSummary
       );
       res.json({ text });
     } catch (error) {
@@ -427,13 +427,66 @@ function registerAIRoutes(app: express.Express, config: ServerConfig, geminiClie
         payload.prompt,
         payload.messages,
         getLocalAICompletionsEndpoint(config),
-        payload.systemInstruction
+        payload.systemInstruction,
+        payload.contextSummary
       );
       res.json({ text });
     } catch (error) {
       console.error("Local AI Endpoint Error:", error);
       res.status(503).json({ error: "Local AI model server is offline or busy." });
     }
+  });
+
+  // Compile-only endpoint used by the client before downloading C code
+  app.post('/api/compile', (req, res) => {
+    const code = req.body?.code;
+    if (typeof code !== 'string') {
+      res.status(400).json({ error: 'Missing or invalid `code` in request body.' });
+      return;
+    }
+
+    const gccPath = getGccPath();
+    if (!gccPath) {
+      res.status(500).json({ error: 'GCC not found on server.' });
+      return;
+    }
+
+    const exportsRoot = path.join(process.cwd(), 'SessionFiles', 'exports');
+    if (!fs.existsSync(exportsRoot)) fs.mkdirSync(exportsRoot, { recursive: true });
+
+    const compileId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    const cFilename = path.join(exportsRoot, `${compileId}.c`);
+    let exeFilename = path.join(exportsRoot, compileId);
+    if (process.platform === 'win32') exeFilename += '.exe';
+
+    try {
+      fs.writeFileSync(cFilename, code);
+    } catch (err) {
+      res.status(500).json({ error: `Failed to write temp C file: ${err instanceof Error ? err.message : String(err)}` });
+      return;
+    }
+
+    const compile = spawn(gccPath, [cFilename, '-o', exeFilename]);
+    let stdout = '';
+    let stderr = '';
+    compile.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    compile.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+    compile.on('close', (code) => {
+      const output = sanitizeDiagnosticText(stderr || stdout || `exit code ${code}`);
+      if (code !== 0) {
+        res.json({ ok: false, output });
+      } else {
+        res.json({ ok: true, output });
+      }
+      // best-effort cleanup of temp files
+      try { if (fs.existsSync(cFilename)) fs.rmSync(cFilename); } catch {}
+      try { if (fs.existsSync(exeFilename)) fs.rmSync(exeFilename); } catch {}
+    });
+
+    compile.on('error', (err) => {
+      res.status(500).json({ error: `Compiler spawn error: ${err instanceof Error ? err.message : String(err)}` });
+    });
   });
 }
 
@@ -459,7 +512,19 @@ function setupWebSocketServer(httpServer: ReturnType<express.Express["listen"]>,
 
   wss.on("connection", (ws: WebSocket) => {
     wsLog("✓ Client connected");
-    wsClient = ws;
+    const clientId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    const { cDir, exeDir } = ensureClientCodeDirectories(clientId);
+
+    const session: ClientSession = {
+      id: clientId,
+      ws,
+      runningProcess: null,
+      activeDebugSession: null,
+      cDir,
+      exeDir,
+    };
+
+    clientSessions.set(ws, session);
 
     ws.on("message", (message: Buffer) => {
       try {
@@ -467,13 +532,13 @@ function setupWebSocketServer(httpServer: ReturnType<express.Express["listen"]>,
         wsLog(`Received action: ${event.action}`);
 
         switch (event.action) {
-          case "RUN_CODE": {handleRunCode(event.data || "");break;}
-          case "DEBUG": {handleDebug(event.data || "");break;}
-          case "DEBUG_STEP_OVER": {handleDebugStepOver();break;}
-          case "DEBUG_STEP_INTO": {handleDebugStepInto();break;}
-          case "DEBUG_STEP_OUT": {handleDebugStepOut();break;}
-          case "SEND_INPUT": {handleSendInput(event.data || "");break;}
-          case "STOP_EXECUTION": {handleStopExecution();break;}
+          case "RUN_CODE": {handleRunCode(session, event.data || "");break;}
+          case "DEBUG": {handleDebug(session, event.data || "");break;}
+          case "DEBUG_STEP_OVER": {handleDebugStepOver(session);break;}
+          case "DEBUG_STEP_INTO": {handleDebugStepInto(session);break;}
+          case "DEBUG_STEP_OUT": {handleDebugStepOut(session);break;}
+          case "SEND_INPUT": {handleSendInput(session, event.data || "");break;}
+          case "STOP_EXECUTION": {handleStopExecution(session);break;}
           default: {wsLog(`⚠ Unknown action: ${event.action}`);}
         }
       } catch (error) {
@@ -483,12 +548,16 @@ function setupWebSocketServer(httpServer: ReturnType<express.Express["listen"]>,
 
     ws.on("close", () => {
       wsLog("✓ Client disconnected");
-      stopRunningProcess("Killing running process on client disconnect...");
-      if (activeDebugSession) {
-        wsLog("Cleaning up debug session on client disconnect...");
-        cleanActiveGdbSession();
+      const session = clientSessions.get(ws);
+      if (session) {
+        stopRunningProcess(session, "Killing running process on client disconnect...");
+        if (session.activeDebugSession) {
+          wsLog("Cleaning up debug session on client disconnect...");
+          cleanActiveGdbSession(session);
+        }
+        cleanupClientFiles(session);
+        clientSessions.delete(ws);
       }
-      wsClient = null;
     });
 
     ws.on("error", (error) => {
@@ -497,6 +566,29 @@ function setupWebSocketServer(httpServer: ReturnType<express.Express["listen"]>,
   });
 
   return wss;
+}
+
+function ensureClientCodeDirectories(clientId: string) {
+  const sessionRoot = path.join(process.cwd(), "SessionFiles", clientId);
+  const cDir = path.join(sessionRoot, "C_Source");
+  const exeDir = path.join(sessionRoot, "C_Build");
+
+  if (!fs.existsSync(cDir)) fs.mkdirSync(cDir, { recursive: true });
+  if (!fs.existsSync(exeDir)) fs.mkdirSync(exeDir, { recursive: true });
+
+  return { cDir, exeDir };
+}
+
+function cleanupClientFiles(session: ClientSession) {
+  try {
+    const sessionRoot = path.dirname(session.cDir);
+    if (fs.existsSync(sessionRoot)) {
+      fs.rmSync(sessionRoot, { recursive: true, force: true });
+      wsLog(`Deleted session files for client ${session.id}: ${sessionRoot}`);
+    }
+  } catch (error) {
+    console.error(`Error cleaning up client files for ${session.id}:`, error);
+  }
 }
 
 function registerShutdownHandlers(httpServer: any, wss: WebSocketServer) {
@@ -555,17 +647,20 @@ function gracefulShutdown(httpServer: any, wss: WebSocketServer) {
     wsLog('✓ WebSocket server closed');
   });
   
+  // Clean up all client sessions
+  clientSessions.forEach((session) => {
+    stopRunningProcess(session, 'Killing running process...');
+    if (session.activeDebugSession) {
+      wsLog(`Killing debug session for client ${session.id}...`);
+      cleanActiveGdbSession(session);
+    }
+    cleanupClientFiles(session);
+  });
+
   // Close the HTTP server
   wsLog('Closing HTTP server...');
   httpServer.close(() => {
     wsLog('✓ HTTP server closed');
-    stopRunningProcess('Killing running process...');
-    
-    if (activeDebugSession) {
-      wsLog('Killing debug session...');
-      cleanActiveGdbSession();
-    }
-    
     wsLog('Exiting...');
     process.exit(0);
   });
@@ -582,17 +677,17 @@ startServer().catch((error) => {
 
 // ===== WebSocket Action Handlers =====
 
-function handleRunCode(codeString: string) {
+function handleRunCode(session: ClientSession, codeString: string) {
   wsLog('Processing RUN_CODE...');
 
-  stopRunningProcess('Killing existing process...');
+  stopRunningProcess(session, 'Killing existing process...');
 
-  const gccPath = requireGccPath();
+  const gccPath = requireGccPath(session.ws);
   if (!gccPath) {
     return;
   }
 
-  const { cFilename, exeFilename } = getCodePaths('program');
+  const { cFilename, exeFilename } = getCodePaths(session, 'program');
 
   try {
     let finalCode = codeString;
@@ -617,61 +712,61 @@ function handleRunCode(codeString: string) {
     compileProcess.on('close', (exitCode) => {
       if (exitCode !== 0) {
         wsLog(`✗ Compilation failed with code ${exitCode}`);
-        sendToClient('Error', `Compilation error:\n${sanitizeDiagnosticText(compilerLogs.getOutput())}`);
+        sendToClient(session.ws, 'Error', `Compilation error:\n${sanitizeDiagnosticText(compilerLogs.getOutput())}`);
         return;
       }
 
       wsLog('✓ Compilation successful, spawning process...');
 
-      runningProcess = spawn(exeFilename, [], {
+      session.runningProcess = spawn(exeFilename, [], {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true
       });
 
-      runningProcess.stdout?.on('data', (data: Buffer) => {
+      session.runningProcess.stdout?.on('data', (data: Buffer) => {
         const output = data.toString();
         wsLog(`[program stdout] ${output}`);
-        sendToClient('Outputs', output);
+        sendToClient(session.ws, 'Outputs', output);
       });
 
-      runningProcess.stderr?.on('data', (data: Buffer) => {
+      session.runningProcess.stderr?.on('data', (data: Buffer) => {
         const output = data.toString();
         const sanitizedOutput = sanitizeDiagnosticText(output);
         wsLog(`[program stderr] ${sanitizedOutput}`);
-        sendToClient('Error', sanitizedOutput);
+        sendToClient(session.ws, 'Error', sanitizedOutput);
       });
 
-      runningProcess.on('close', (code) => {
+      session.runningProcess.on('close', (code) => {
         wsLog(`✓ Process exited with code ${code}`);
-        sendToClient('Status', `Process exited with code ${code}`);
-        runningProcess = null;
+        sendToClient(session.ws, 'Status', `Process exited with code ${code}`);
+        session.runningProcess = null;
       });
 
-      runningProcess.on('error', (err) => {
+      session.runningProcess.on('error', (err) => {
         wsLog(`✗ Process error: ${err.message}`);
-        sendToClient('Error', `Process error: ${err.message}`);
-        runningProcess = null;
+        sendToClient(session.ws, 'Error', `Process error: ${err.message}`);
+        session.runningProcess = null;
       });
     });
 
     compileProcess.on('error', (err) => {
       wsLog(`✗ Compiler spawn error: ${err.message}`);
-      sendToClient('Error', `Compiler error: ${err.message}`);
+      sendToClient(session.ws, 'Error', `Compiler error: ${err.message}`);
     });
   } catch (error) {
     wsLog(`✗ Exception in handleRunCode: ${error instanceof Error ? error.message : String(error)}`);
-    sendToClient('Error', `Internal error: ${error instanceof Error ? error.message : String(error)}`);
+    sendToClient(session.ws, 'Error', `Internal error: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-function handleSendInput(inputText: string) {
+function handleSendInput(session: ClientSession, inputText: string) {
   wsLog(`Sending input: ${inputText}`);
 
   const textToSend = inputText.endsWith('\n') ? inputText : inputText + '\n';
 
-  if (activeDebugSession?.gdbProcess.stdin && activeDebugSession.gdbProcess.stdin.writable) {
+  if (session.activeDebugSession?.gdbProcess.stdin && session.activeDebugSession.gdbProcess.stdin.writable) {
     try {
-      activeDebugSession.gdbProcess.stdin.write(textToSend);
+      session.activeDebugSession.gdbProcess.stdin.write(textToSend);
       wsLog('✓ Input sent to debug session');
       return;
     } catch (error) {
@@ -680,9 +775,9 @@ function handleSendInput(inputText: string) {
     }
   }
 
-  if (runningProcess?.stdin && runningProcess.stdin.writable) {
+  if (session.runningProcess?.stdin && session.runningProcess.stdin.writable) {
     try {
-      runningProcess.stdin.write(textToSend);
+      session.runningProcess.stdin.write(textToSend);
       wsLog('✓ Input sent to run session');
       return;
     } catch (error) {
@@ -692,38 +787,38 @@ function handleSendInput(inputText: string) {
   }
 
   wsLog('⚠ No active session with writable stdin');
-  sendToClient('Error', 'No active run/debug session available for input.');
+  sendToClient(session.ws, 'Error', 'No active run/debug session available for input.');
 }
 
-function handleStopExecution() {
+function handleStopExecution(session: ClientSession) {
   wsLog('Processing STOP_EXECUTION...');
 
-  if (activeDebugSession) {
+  if (session.activeDebugSession) {
     wsLog('Terminating active debug session...');
-    cleanActiveGdbSession();
-    sendToClient('Status', 'Execution stopped by user.');
+    cleanActiveGdbSession(session);
+    sendToClient(session.ws, 'Status', 'Execution stopped by user.');
     return;
   }
 
-  if (stopRunningProcess('Terminating running process...')) {
-    sendToClient('Status', 'Execution stopped by user.');
+  if (stopRunningProcess(session, 'Terminating running process...')) {
+    sendToClient(session.ws, 'Status', 'Execution stopped by user.');
     return;
   }
 
   wsLog('⚠ No active run/debug session to stop');
 }
 
-function handleDebug(codeString: string) {
+function handleDebug(session: ClientSession, codeString: string) {
   wsLog('Processing DEBUG...');
 
-  cleanActiveGdbSession();
+  cleanActiveGdbSession(session);
 
-  const gccPath = requireGccPath();
+  const gccPath = requireGccPath(session.ws);
   if (!gccPath) {
     return;
   }
 
-  const { cFilename, exeFilename } = getCodePaths('SeeC_Debug_Workspace');
+  const { cFilename, exeFilename } = getCodePaths(session, 'SeeC_Debug_Workspace');
 
   try {
     let debugCode = codeString;
@@ -741,7 +836,7 @@ function handleDebug(codeString: string) {
     compileProcess.on('close', (exitCode) => {
       if (exitCode !== 0) {
         wsLog(`✗ Debug compilation failed with code ${exitCode}`);
-        sendToClient('Error', `Debug compilation error:\n${sanitizeDiagnosticText(compilerLogs.getOutput())}`);
+        sendToClient(session.ws, 'Error', `Debug compilation error:\n${sanitizeDiagnosticText(compilerLogs.getOutput())}`);
         return;
       }
 
@@ -749,7 +844,7 @@ function handleDebug(codeString: string) {
 
       const gdbProcess = spawn('gdb', ['-q', '--interpreter=mi2', exeFilename]);
 
-      const session: DebugSession = {
+      const debugSession: DebugSession = {
         gdbProcess,
         programStdout: '',
         programStderr: '',
@@ -766,15 +861,15 @@ function handleDebug(codeString: string) {
         sourceLines: debugCode.replace(/\r/g, '').split('\n'),
       };
 
-      activeDebugSession = session;
+      session.activeDebugSession = debugSession;
       let responseAlreadySent = false;
 
       gdbProcess.stdout?.on('data', (data: Buffer) => {
         try {
           const chunk = data.toString();
           console.log(`[GDB E stdout] ${chunk}`);
-          processGdbMiChunk(session, chunk, "stdout");
-          flushDebugOutput(session);
+          processGdbMiChunk(session.activeDebugSession!, chunk, "stdout");
+          flushDebugOutput(session.activeDebugSession!, session.ws);
         } catch (e) {
           wsLog(`✗ Error parsing GDB MI stdout: ${e}`);
         }
@@ -784,22 +879,23 @@ function handleDebug(codeString: string) {
         try {
           const chunk = data.toString();
           console.log(`[GDB E stderr] ${chunk}`);
-          processGdbMiChunk(session, chunk, "stderr");
-          flushDebugOutput(session);
+          processGdbMiChunk(session.activeDebugSession!, chunk, "stderr");
+          flushDebugOutput(session.activeDebugSession!, session.ws);
         } catch (e) {
           wsLog(`✗ Error parsing GDB MI stderr: ${e}`);
         }
       });
 
       const waitForInitial = setInterval(() => {
-        if (responseAlreadySent) return;
+        if (responseAlreadySent || !session.activeDebugSession) return;
         
-        if (session.currentLine !== null) {
+        const currentLine = session.activeDebugSession.currentLine;
+        if (currentLine !== null) {
           responseAlreadySent = true;
           clearInterval(waitForInitial);
           
-          wsLog(`✓ GDB paused at line ${session.currentLine}`);
-          sendLineStatus('Paused', session.currentLine);
+          wsLog(`✓ GDB paused at line ${currentLine}`);
+          sendLineStatus(session.ws, 'Paused', currentLine);
         }
       }, 50);
 
@@ -811,123 +907,123 @@ function handleDebug(codeString: string) {
         if (!responseAlreadySent) {
           responseAlreadySent = true;
           clearInterval(waitForInitial);
-          cleanActiveGdbSession();
-          sendToClient('Error', `GDB runtime error: ${err.message}`);
+          cleanActiveGdbSession(session);
+          sendToClient(session.ws, 'Error', `GDB runtime error: ${err.message}`);
         }
       });
     });
 
     compileProcess.on('error', (err) => {
       wsLog(`✗ Debug compiler spawn error: ${err.message}`);
-      sendToClient('Error', `Compiler error: ${err.message}`);
+      sendToClient(session.ws, 'Error', `Compiler error: ${err.message}`);
     });
   } catch (error) {
     wsLog(`✗ Exception in handleDebug: ${error instanceof Error ? error.message : String(error)}`);
-    cleanActiveGdbSession();
-    sendToClient('Error', `Debug error: ${error instanceof Error ? error.message : String(error)}`);
+    cleanActiveGdbSession(session);
+    sendToClient(session.ws, 'Error', `Debug error: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-function handleDebugStep(mode: "over" | "into" | "out") {
+function handleDebugStep(session: ClientSession, mode: "over" | "into" | "out") {
   const actionName = mode === "over" ? "DEBUG_STEP_OVER" : mode === "into" ? "DEBUG_STEP_INTO" : "DEBUG_STEP_OUT";
   const modeLabel = mode === "over" ? "Step over" : mode === "into" ? "Step into" : "Step out";
   const gdbCommand = mode === "over" ? "-exec-next\n" : mode === "into" ? "-exec-step\n" : "-exec-finish\n";
 
   wsLog(`Processing ${actionName}...`);
 
-  if (!activeDebugSession) {
+  if (!session.activeDebugSession) {
     wsLog('⚠ No active debug session');
-    sendToClient('Error', 'No active debug session running');
+    sendToClient(session.ws, 'Error', 'No active debug session running');
     return;
   }
 
-  const session = activeDebugSession;
-  if (session.stepInProgress) {
+  const debugSession = session.activeDebugSession;
+  if (debugSession.stepInProgress) {
     wsLog(`⚠ ${modeLabel} already in progress`);
     return;
   }
 
-  if (session.waitingForInput) {
+  if (debugSession.waitingForInput) {
     wsLog(`⚠ ${modeLabel} is waiting for input and cannot advance until input is sent`);
-    sendLineStatus('Waiting for input', session.currentLine);
+    sendLineStatus(session.ws, 'Waiting for input', debugSession.currentLine);
     return;
   }
 
-  const previousLine = session.currentLine;
+  const previousLine = debugSession.currentLine;
   const startedAt = Date.now();
 
-  session.stepInProgress = true;
-  session.waitingForInput = false;
+  debugSession.stepInProgress = true;
+  debugSession.waitingForInput = false;
 
-  session.gdbProcess.stdin?.write(gdbCommand);
+  debugSession.gdbProcess.stdin?.write(gdbCommand);
 
   const clearStepPoll = () => {
-    if (session.stepPoll) {
-      clearInterval(session.stepPoll);
-      session.stepPoll = null;
+    if (debugSession.stepPoll) {
+      clearInterval(debugSession.stepPoll);
+      debugSession.stepPoll = null;
     }
   };
 
   clearStepPoll();
 
-  session.stepPoll = setInterval(() => {
-    const hasLineChange = session.currentLine !== previousLine;
-    const isComplete = session.completed;
+  debugSession.stepPoll = setInterval(() => {
+    const hasLineChange = debugSession.currentLine !== previousLine;
+    const isComplete = debugSession.completed;
     const elapsed = Date.now() - startedAt;
     
-    if (!hasLineChange && !isComplete && elapsed > 800 && !session.waitingForInput) {
-      const currentLine = session.currentLine ?? previousLine;
-      if (isLikelyInputLine(session, currentLine)) {
-        session.waitingForInput = true;
+    if (!hasLineChange && !isComplete && elapsed > 800 && !debugSession.waitingForInput) {
+      const currentLine = debugSession.currentLine ?? previousLine;
+      if (isLikelyInputLine(debugSession, currentLine)) {
+        debugSession.waitingForInput = true;
         wsLog('ℹ Debugger waiting for program input');
-        sendLineStatus('Waiting for input', currentLine);
+        sendLineStatus(session.ws, 'Waiting for input', currentLine);
         return;
       }
 
       clearStepPoll();
-      session.stepInProgress = false;
-      session.waitingForInput = false;
+      debugSession.stepInProgress = false;
+      debugSession.waitingForInput = false;
       wsLog('ℹ Step timeout on non-input line; returning to paused state');
-      sendLineStatus('Paused', currentLine);
+      sendLineStatus(session.ws, 'Paused', currentLine);
       return;
     }
 
     if (hasLineChange || isComplete) {
       clearStepPoll();
-      session.stepInProgress = false;
-      session.waitingForInput = false;
+      debugSession.stepInProgress = false;
+      debugSession.waitingForInput = false;
 
       if (isComplete) {
         wsLog('✓ Debug process completed');
-        cleanActiveGdbSession();
-        sendToClient('Status', `Debug process exited with code ${session.exitCode}`);
+        cleanActiveGdbSession(session);
+        sendToClient(session.ws, 'Status', `Debug process exited with code ${debugSession.exitCode}`);
       } else {
-        wsLog(`✓ GDB stepped to line ${session.currentLine}`);
-        sendLineStatus('Paused', session.currentLine);
+        wsLog(`✓ GDB stepped to line ${debugSession.currentLine}`);
+        sendLineStatus(session.ws, 'Paused', debugSession.currentLine);
       }
 
       return;
     }
 
-    if (!hasLineChange && session.completed) {
+    if (!hasLineChange && debugSession.completed) {
       clearStepPoll();
-      session.stepInProgress = false;
-      session.waitingForInput = false;
+      debugSession.stepInProgress = false;
+      debugSession.waitingForInput = false;
       wsLog('✓ Debug completion detected without line change');
-      cleanActiveGdbSession();
-      sendToClient('Status', `Debug process exited with code ${session.exitCode}`);
+      cleanActiveGdbSession(session);
+      sendToClient(session.ws, 'Status', `Debug process exited with code ${debugSession.exitCode}`);
     }
   }, 50);
 }
 
-function handleDebugStepOver() {
-  handleDebugStep("over");
+function handleDebugStepOver(session: ClientSession) {
+  handleDebugStep(session, "over");
 }
 
-function handleDebugStepInto() {
-  handleDebugStep("into");
+function handleDebugStepInto(session: ClientSession) {
+  handleDebugStep(session, "into");
 }
 
-function handleDebugStepOut() {
-  handleDebugStep("out");
+function handleDebugStepOut(session: ClientSession) {
+  handleDebugStep(session, "out");
 }

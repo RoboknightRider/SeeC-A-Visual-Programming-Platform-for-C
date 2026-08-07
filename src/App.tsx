@@ -598,29 +598,25 @@ function Flow() {
   const [isCodeModalOpen, setIsCodeModalOpen] = useState(false);
   const [importCodeValue, setImportCodeValue] = useState('');
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const flowActionsRef = React.useRef<import('./components/FlowCanvas').FlowCanvasActions | null>(null);
 
-  React.useEffect(() => {
-    const openImportModal = () => {
-      setIsCodeModalOpen(true);
-    };
+  const registerFlowActions = React.useCallback((actions: import('./components/FlowCanvas').FlowCanvasActions | null) => {
+    flowActionsRef.current = actions;
+  }, []);
 
-    (window as Window & { openImportModal?: () => void }).openImportModal = openImportModal;
-
-    return () => {
-      delete (window as Window & { openImportModal?: () => void }).openImportModal;
-    };
+  const handleOpenImportModal = React.useCallback(() => {
+    setIsCodeModalOpen(true);
   }, []);
 
   const handleAskAI = useCallback(() => {
     const fullLogString = terminalLogs.join("\n");
     setActiveErrorLog(fullLogString);
     setShowChat(true);
-  }, [terminalLogs, generatedCode]);
+  }, [terminalLogs]);
 
   const saveProject = useCallback(() => {
-    const exportProject = (window as Window & { exportProject?: () => string }).exportProject;
-    if (exportProject) {
-      const json = exportProject();
+    const json = flowActionsRef.current?.exportProject();
+    if (json) {
       const element = document.createElement('a');
       const file = new Blob([json], { type: 'application/json' });
       element.href = URL.createObjectURL(file);
@@ -637,13 +633,12 @@ function Flow() {
 
   const handleFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    const importProject = (window as Window & { importProject?: (json: string) => void }).importProject;
 
-    if (file && importProject) {
+    if (file && flowActionsRef.current?.importProject) {
       const reader = new FileReader();
       reader.onload = (e) => {
         const content = e.target?.result as string;
-        importProject(content);
+        flowActionsRef.current?.importProject(content);
       };
       reader.readAsText(file);
     }
@@ -658,13 +653,41 @@ function Flow() {
   }, [generatedCode]);
 
   const downloadAsCFile = useCallback(() => {
-    const element = document.createElement("a");
-    const file = new Blob([generatedCode], { type: 'text/plain' });
-    element.href = URL.createObjectURL(file);
-    element.download = "program.c";
-    document.body.appendChild(element);
-    element.click();
-    document.body.removeChild(element);
+    (async () => {
+      addTerminalLog('Status', `[${getTimestamp()}] Validating compilation before download...`);
+      try {
+        const res = await fetch('/api/compile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: generatedCode })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          addTerminalLog('Error', `[${getTimestamp()}] Compile endpoint error: ${data.error || 'Unknown error'}`);
+          setTerminalOpen(true);
+          return;
+        }
+
+        if (!data.ok) {
+          addTerminalLog('Error', `[${getTimestamp()}] Compilation failed:\n${data.output || 'No output'}`);
+          setTerminalOpen(true);
+          return;
+        }
+
+        // Compilation succeeded; proceed to download source file
+        const element = document.createElement('a');
+        const file = new Blob([generatedCode], { type: 'text/plain' });
+        element.href = URL.createObjectURL(file);
+        element.download = 'program.c';
+        document.body.appendChild(element);
+        element.click();
+        document.body.removeChild(element);
+        addTerminalLog('Status', `[${getTimestamp()}] Compilation OK — source downloaded.`);
+      } catch (err) {
+        addTerminalLog('Error', `[${getTimestamp()}] Network or compile error: ${err instanceof Error ? err.message : String(err)}`);
+        setTerminalOpen(true);
+      }
+    })();
   }, [generatedCode]);
 
   const clearTerminal = useCallback(() => {
@@ -868,10 +891,7 @@ function Flow() {
   }, []);
 
   const addNode = useCallback((type: string) => {
-    const addNodeToFlow = (window as Window & { addNodeToFlow?: (type: string) => void }).addNodeToFlow;
-    if (addNodeToFlow) {
-      addNodeToFlow(type);
-    }
+    flowActionsRef.current?.addNode(type);
   }, []);
 
   return (
@@ -916,6 +936,8 @@ function Flow() {
             <FlowCanvas
               onCodeChange={setGeneratedCode}
               onNodesCountChange={setNodesCount}
+              registerActions={registerFlowActions}
+              onOpenImportModal={handleOpenImportModal}
             />
           </div>
 
@@ -996,7 +1018,7 @@ function Flow() {
               <button
                 onClick={() => {
                   if (importCodeValue.trim()) {
-                    (window as any).importCode?.(importCodeValue);
+                    flowActionsRef.current?.importCode(importCodeValue);
                     setIsCodeModalOpen(false);
                     setImportCodeValue('');
                   }

@@ -284,17 +284,27 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => 
 const initialNodes: Node[] = [];
 const initialEdges: Edge[] = [];
 
+export type FlowCanvasActions = {
+  addNode: (type: string) => void;
+  layout: () => void;
+  exportProject: () => string;
+  importProject: (json: string) => void;
+  importCode: (code: string) => Promise<void>;
+};
+
 const internalNodeTypes = Object.keys(NODE_REGISTRY).reduce((acc, key) => {
   acc[key] = BaseNode;
   return acc;
-}, {} as any);
+}, {} as Record<string, React.ComponentType<any>>);
 
 interface FlowCanvasProps {
   onCodeChange: (code: string) => void;
   onNodesCountChange: (count: number) => void;
+  onOpenImportModal?: () => void;
+  registerActions?: (actions: FlowCanvasActions | null) => void;
 }
 
-export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange }: FlowCanvasProps) => {
+export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpenImportModal, registerActions }: FlowCanvasProps) => {
   const { screenToFlowPosition, deleteElements, getNodes, getEdges, fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -489,61 +499,58 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange }: Flow
   }, [setEdges, setNodes, triggerCodeGeneration]);
 
   useEffect(() => {
-    (window as any).addNodeToFlow = addNode;
-    (window as any).onLayout = handleLayout;
-    (window as any).importCode = async (code: string) => {
-      try {
-        const { nodes: newNodes, edges: newEdges } = parseCodeToNodes(code);
-
-        if (newNodes.length > 0) {
-          setNodes(newNodes);
-          setEdges(newEdges);
-
-          setTimeout(() => {
-            (window as any).onLayout?.();
-          }, 50);
-        } else {
-          console.error('Parser returned no nodes');
-          alert('Could not parse the code. Please ensure it is valid C code.');
-        }
-      } catch (error) {
-        console.error('Parsing failed:', error);
-        alert('Failed to parse code. Please check the console for details.');
-      }
-    };
-
-    (window as any).exportProject = () => {
-      const flow = {
-        nodes: getNodes(),
-        edges: getEdges(),
-        viewport: { x: 0, y: 0, zoom: 1 },
-      };
-      return JSON.stringify(flow, null, 2);
-    };
-
-    (window as any).importProject = (json: string) => {
-      try {
-        const flow = JSON.parse(json);
-        if (flow) {
+    const actions: FlowCanvasActions = {
+      addNode,
+      layout: handleLayout,
+      exportProject: () => {
+        const flow = {
+          nodes: getNodes(),
+          edges: getEdges(),
+          viewport: { x: 0, y: 0, zoom: 1 },
+        };
+        return JSON.stringify(flow, null, 2);
+      },
+      importProject: (json: string) => {
+        try {
+          const flow = JSON.parse(json);
           const newNodes = flow.nodes || [];
           const newEdges = flow.edges || [];
           setNodes(newNodes);
           setEdges(newEdges);
           triggerCodeGeneration(newNodes, newEdges);
           setTimeout(() => fitView({ padding: 0.2, duration: 800 }), 100);
+        } catch (error) {
+          console.error('Failed to import project', error);
+          alert('Invalid project file');
         }
-      } catch (error) {
-        console.error('Failed to import project', error);
-        alert('Invalid project file');
-      }
+      },
+      importCode: async (code: string) => {
+        try {
+          const { nodes: newNodes, edges: newEdges } = parseCodeToNodes(code);
+
+          if (newNodes.length > 0) {
+            setNodes(newNodes);
+            setEdges(newEdges);
+            setTimeout(() => {
+              handleLayout();
+            }, 50);
+          } else {
+            console.error('Parser returned no nodes');
+            alert('Could not parse the code. Please ensure it is valid C code.');
+          }
+        } catch (error) {
+          console.error('Parsing failed:', error);
+          alert('Failed to parse code. Please check the console for details.');
+        }
+      },
     };
 
+    registerActions?.(actions);
+
     return () => {
-      delete (window as any).addNodeToFlow;
-      delete (window as any).exportProject;
-      delete (window as any).importProject;
+      registerActions?.(null);
     };
-  }, [addNode, fitView, getEdges, getNodes, handleLayout, setEdges, setNodes, triggerCodeGeneration]);
+  }, [addNode, fitView, getEdges, getNodes, handleLayout, registerActions, setEdges, setNodes, triggerCodeGeneration]);
 
   const hasAutoLayoutedRef = useRef(false);
   useEffect(() => {
@@ -595,7 +602,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange }: Flow
           </button>
           <div className="w-px h-4 bg-zinc-800 my-auto mx-1" />
           <button 
-            onClick={() => (window as any).openImportModal?.()}
+            onClick={() => onOpenImportModal?.()}
             className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 transition-colors"
             title="Code to Nodes"
           >

@@ -1,8 +1,5 @@
 node_modules/
-C_Build/*
-!C_Build/
-C_Source/*
-!C_Source/
+SessionFiles/
 .env
 models/*
 !models/

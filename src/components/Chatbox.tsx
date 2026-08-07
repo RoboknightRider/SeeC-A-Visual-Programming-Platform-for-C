@@ -39,6 +39,8 @@ interface AIStatusResponse {
 }
 
 const AI_PROVIDER_SESSION_KEY = 'seec-ai-provider';
+const CHAT_MESSAGES_STORAGE_KEY = 'seec-chat-messages';
+const CHAT_SUMMARY_STORAGE_KEY = 'seec-chat-summary';
 const DEFAULT_CHATBOX_WIDTH = 416;
 const DEFAULT_CHATBOX_HEIGHT = 448;
 const MIN_CHATBOX_WIDTH = 340;
@@ -56,6 +58,36 @@ const getInitialProvider = (): AIProvider => {
   return saved === 'local' ? 'local' : 'gemini';
 };
 
+const getSavedMessages = (): Message[] => {
+  if (typeof window === 'undefined') {
+    return INITIAL_CHAT_MESSAGES;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(CHAT_MESSAGES_STORAGE_KEY);
+    if (!raw) {
+      return INITIAL_CHAT_MESSAGES;
+    }
+
+    const parsed = JSON.parse(raw) as Message[];
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return INITIAL_CHAT_MESSAGES;
+    }
+
+    return parsed;
+  } catch {
+    return INITIAL_CHAT_MESSAGES;
+  }
+};
+
+const getSavedSummary = (): string => {
+  if (typeof window === 'undefined') {
+    return '';
+  }
+
+  return window.localStorage.getItem(CHAT_SUMMARY_STORAGE_KEY) || '';
+};
+
 export const Chatbox: React.FC<ChatboxProps> = ({
   showChat,
   setShowChat,
@@ -63,15 +95,61 @@ export const Chatbox: React.FC<ChatboxProps> = ({
   initialCode,        
   clearInitialError    
 }) => {
-  const [messages, setMessages] = useState<Message[]>(INITIAL_CHAT_MESSAGES);
+  const [messages, setMessages] = useState<Message[]>(getSavedMessages);
   const [chatInput, setChatInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
   const [geminiAvailable, setGeminiAvailable] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [chatboxSize, setChatboxSize] = useState({ width: DEFAULT_CHATBOX_WIDTH, height: DEFAULT_CHATBOX_HEIGHT });
-  
+  const [contextSummary, setContextSummary] = useState(getSavedSummary());
+
   const [aiProvider, setAiProvider] = useState<AIProvider>(getInitialProvider);
+
+  const RECENT_MESSAGE_COUNT = 6;
+  const SUMMARY_MESSAGE_THRESHOLD = 10;
+
+  const getRecentMessages = useCallback((allMessages: Message[]) => {
+    return allMessages.slice(-RECENT_MESSAGE_COUNT);
+  }, []);
+
+  const getMessagesToSummarize = useCallback((allMessages: Message[]) => {
+    const olderMessageCount = allMessages.length - RECENT_MESSAGE_COUNT;
+    return olderMessageCount > 0 ? allMessages.slice(0, olderMessageCount) : [];
+  }, []);
+
+  const buildSummaryPrompt = useCallback((messagesToSummarize: Message[], existingSummary: string) => {
+    const conversationText = messagesToSummarize
+      .map((message) => `${message.sender === 'user' ? 'User' : 'Assistant'}: ${message.text}`)
+      .join('\n');
+
+    if (!conversationText) {
+      return '';
+    }
+
+    if (existingSummary?.trim()) {
+      return `You already have this summary of the prior conversation:\n${existingSummary.trim()}\n\nUpdate and improve it using the following older chat history. Keep the summary short, focused on the user's goal, what was tried, what failed, and the current situation:\n\n${conversationText}`;
+    }
+
+    return `Summarize the following older conversation for future replies. Keep it short, focused on the user's goal, what was tried, what failed, and the current situation:\n\n${conversationText}`;
+  }, []);
+
+  const updateContextSummary = useCallback(async (allMessages: Message[]) => {
+    const messagesToSummarize = getMessagesToSummarize(allMessages);
+    if (messagesToSummarize.length === 0) {
+      return;
+    }
+
+    const prompt = buildSummaryPrompt(messagesToSummarize, contextSummary);
+    if (!prompt) {
+      return;
+    }
+
+    const res = await askAI(prompt, [], aiProvider, contextSummary);
+    if (res.text && typeof res.text === 'string') {
+      setContextSummary(res.text.trim());
+    }
+  }, [aiProvider, contextSummary, buildSummaryPrompt, getMessagesToSummarize]);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const resizeStateRef = useRef<{ startX: number; startY: number; startWidth: number; startHeight: number } | null>(null);
@@ -119,6 +197,15 @@ export const Chatbox: React.FC<ChatboxProps> = ({
 
     window.sessionStorage.setItem(AI_PROVIDER_SESSION_KEY, aiProvider);
   }, [aiProvider]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(CHAT_MESSAGES_STORAGE_KEY, JSON.stringify(messages));
+    window.localStorage.setItem(CHAT_SUMMARY_STORAGE_KEY, contextSummary);
+  }, [messages, contextSummary]);
 
   useEffect(() => {
     if (isFullscreen) {
@@ -207,6 +294,12 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     setChatInput('');
     setCopiedCodeKey(null);
     setIsLoading(false);
+    setContextSummary('');
+
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(CHAT_MESSAGES_STORAGE_KEY);
+      window.localStorage.removeItem(CHAT_SUMMARY_STORAGE_KEY);
+    }
 
     if (clearInitialError) {
       clearInitialError();
@@ -247,7 +340,8 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     setChatInput('');
     setIsLoading(true);
 
-    const res = await askAI(userText, nextMessages, currentProvider);
+    const recentMessages = getRecentMessages(nextMessages);
+    const res = await askAI(userText, recentMessages, currentProvider, contextSummary);
     const actualProvider = res.usedProvider || currentProvider;
 
     const aiReply: Message = {
@@ -260,8 +354,12 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     if (currentProvider === 'gemini' && actualProvider === 'local') {
       setAiProvider('local');
     }
-    
-    setMessages(prev => [...prev, aiReply]);
+
+    const updatedMessages = [...nextMessages, aiReply];
+    setMessages(updatedMessages);
+    if (updatedMessages.length > SUMMARY_MESSAGE_THRESHOLD) {
+      void updateContextSummary(updatedMessages);
+    }
     setIsLoading(false);
   }, [chatInput, isLoading, messages, aiProvider]);
 
@@ -284,7 +382,8 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     const nextMessages = [...messages, userMessage];
     setMessages(nextMessages);
 
-    const res = await askAI(userMessage.text, nextMessages, currentProvider);
+    const recentMessages = getRecentMessages(nextMessages);
+    const res = await askAI(userMessage.text, recentMessages, currentProvider, contextSummary);
     const actualProvider = res.usedProvider || currentProvider;
 
     const aiReply: Message = {
@@ -298,9 +397,13 @@ export const Chatbox: React.FC<ChatboxProps> = ({
       setAiProvider('local');
     }
 
-    setMessages(prev => [...prev, aiReply]);
+    const updatedMessages = [...nextMessages, aiReply];
+    setMessages(updatedMessages);
+    if (updatedMessages.length > SUMMARY_MESSAGE_THRESHOLD) {
+      void updateContextSummary(updatedMessages);
+    }
     setIsLoading(false);
-  }, [messages, aiProvider, initialCode]);
+  }, [messages, aiProvider, initialCode, contextSummary, getRecentMessages, updateContextSummary]);
 
   useEffect(() => {
     if (initialError && initialError.trim() !== "" && showChat && !isLoading) {
