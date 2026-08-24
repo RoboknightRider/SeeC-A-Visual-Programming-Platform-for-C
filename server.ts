@@ -43,6 +43,56 @@ function loadServerConfig(): ServerConfig {
 
 const serverConfig = loadServerConfig();
 
+// Cached tool paths: `undefined` = unknown, `null` = not found, string = resolved path or executable name
+const cachedToolPaths: { [key: string]: string | null | undefined } = { gcc: undefined, gdb: undefined };
+
+function resolveTool(name: 'gcc' | 'gdb', localRel: string, binName: string): string | null {
+  // Check env vars first (fast, no exec)
+  const envCandidates = name === 'gcc' ? ['GCC_PATH', 'GCC_HOME', 'CC'] : ['GDB_PATH'];
+  for (const ev of envCandidates) {
+    const raw = process.env[ev]?.trim();
+    if (!raw) continue;
+    let candidate = raw;
+    // If env var points to a directory, try expected executable locations
+    try {
+      if (!fs.existsSync(candidate)) {
+        const try1 = path.join(candidate, 'bin', `${binName}.exe`);
+        const try2 = path.join(candidate, `${binName}.exe`);
+        if (fs.existsSync(try1)) candidate = try1;
+        else if (fs.existsSync(try2)) candidate = try2;
+      }
+    } catch (e) {}
+
+    if (fs.existsSync(candidate)) {
+      cachedToolPaths[name] = candidate;
+      return candidate;
+    }
+
+    // If env var explicitly names the binary (e.g. 'gcc'), assume PATH
+    if (candidate === binName) {
+      cachedToolPaths[name] = binName;
+      return binName;
+    }
+  }
+
+  // Check for bundled portable executable
+  const local = path.join(process.cwd(), localRel);
+  if (fs.existsSync(local)) {
+    cachedToolPaths[name] = local;
+    return local;
+  }
+
+  // As a last resort, verify the binary on PATH once
+  try {
+    execSync(`${binName} --version`, { stdio: 'ignore' });
+    cachedToolPaths[name] = binName;
+    return binName;
+  } catch (e) {
+    cachedToolPaths[name] = null;
+    return null;
+  }
+}
+
 function getLocalAICompletionsEndpoint(config: ServerConfig): string {
   return `http://127.0.0.1:${config.localAiPort}/v1/chat/completions`;
 }
@@ -69,7 +119,7 @@ function startLlamaServer(localAiPort: number) {
     return;
   }
 
-  console.log("[Local AI] Booting llama-server.exe...");
+  wsLog("[Local AI] Booting llama-server.exe...");
   llamaServerProcess = spawn(llamaExecutable, [
     "-m", modelPath,
     "--port", String(localAiPort),
@@ -80,7 +130,7 @@ function startLlamaServer(localAiPort: number) {
   // Avoid logging every stdout/stderr chunk from the model server to reduce console spam.
   // Only surface critical lifecycle events and errors.
   if (llamaServerProcess.pid) {
-    console.log(`[Local AI] llama-server started (pid ${llamaServerProcess.pid})`);
+    wsLog(`[Local AI] llama-server started (pid ${llamaServerProcess.pid})`);
   }
 
   llamaServerProcess.on('error', (err) => {
@@ -88,7 +138,7 @@ function startLlamaServer(localAiPort: number) {
   });
 
   llamaServerProcess.on("close", (code) => {
-    console.log(`[Local AI] Process exited with code ${code}`);
+    wsLog(`[Local AI] Process exited with code ${code}`);
     llamaServerProcess = null;
   });
 }
@@ -170,28 +220,28 @@ function sendLineStatus(ws: WebSocket, prefix: 'Paused' | 'Waiting for input', l
 }
 
 function getGccPath() {
-  const localGcc = path.join(process.cwd(), "gcc", "bin", "gcc.exe");
-  if (fs.existsSync(localGcc)) {
-    return localGcc;
-  }
-
-  try {
-    execSync("gcc --version", { stdio: "ignore" });
-    return "gcc";
-  } catch (error) {
-    return null;
-  }
+  if (cachedToolPaths.gcc !== undefined) return cachedToolPaths.gcc;
+  return resolveTool('gcc', 'gcc/bin/gcc.exe', 'gcc');
 }
 
 function requireGccPath(ws: WebSocket | null) {
-  const gccPath = getGccPath();
-  if (gccPath) {
-    return gccPath;
-  }
+  const p = getGccPath();
+  if (p) return p;
   wsLog('✗ GCC not found');
-  if (ws) {
-    sendToClient(ws, 'Error', 'GCC not found. Please install GCC or place a portable version in the gcc folder.');
-  }
+  if (ws) sendToClient(ws, 'Error', 'GCC not found. Please install GCC or place a portable version in the gcc folder.');
+  return null;
+}
+
+function getGdbPath() {
+  if (cachedToolPaths.gdb !== undefined) return cachedToolPaths.gdb;
+  return resolveTool('gdb', 'gcc/bin/gdb.exe', 'gdb');
+}
+
+function requireGdbPath(ws: WebSocket | null) {
+  const p = getGdbPath();
+  if (p) return p;
+  wsLog('✗ GDB not found');
+  if (ws) sendToClient(ws, 'Error', 'GDB not found. Please install GDB or place a portable version in the gcc folder.');
   return null;
 }
 
@@ -593,82 +643,64 @@ function cleanupClientFiles(session: ClientSession) {
 
 function registerShutdownHandlers(httpServer: any, wss: WebSocketServer) {
   process.on("SIGINT", () => {
-    wsLog("SIGINT received, shutting down gracefully...");
-    gracefulShutdown(httpServer, wss);
+    wsLog("SIGINT received, performing immediate shutdown...");
+    immediateShutdown(httpServer, wss);
   });
 
   process.on("SIGTERM", () => {
-    wsLog("SIGTERM received, shutting down gracefully...");
-    gracefulShutdown(httpServer, wss);
+    wsLog("SIGTERM received, performing immediate shutdown...");
+    immediateShutdown(httpServer, wss);
   });
 
   process.on("uncaughtException", (error) => {
     console.error("Uncaught Exception:", error);
-    gracefulShutdown(httpServer, wss);
+    immediateShutdown(httpServer, wss);
   });
 }
 
 async function startServer() {
-  const app = express();
-  const { appPort, wsPath, localAiPort } = serverConfig;
-  const geminiClient = createGeminiClient();
-
-  startLlamaServer(localAiPort);
-
-  app.use(express.json());
-  registerAIRoutes(app, serverConfig, geminiClient);
-  await setupFrontend(app);
-
-  const httpServer = app.listen(appPort, "0.0.0.0", () => {
-    console.log(`[HTTP] Server running on http://localhost:${appPort}`);
-  });
-
-  const wss = setupWebSocketServer(httpServer, wsPath);
-  registerShutdownHandlers(httpServer, wss);
+  // Initialize components and start servers
+  const { app } = createAppAndClient();
+  initializeLocalAi(serverConfig.localAiPort);
+  await startHttpAndWs(app);
 }
 
-function gracefulShutdown(httpServer: any, wss: WebSocketServer) {
-  wsLog('Closing WebSocket server...');
+function immediateShutdown(httpServer: any, wss: WebSocketServer) {
+  wsLog('Immediate shutdown: killing children and exiting');
 
   // Kill local AI server process if running
-  if (llamaServerProcess) {
-    console.log("[Local AI] Shutting down llama-server...");
-    llamaServerProcess.kill();
-    llamaServerProcess = null;
-  }
-  
-  // Close all WebSocket connections
-  wss.clients.forEach((client) => {
-    client.close(1000, 'Server shutting down');
-  });
-  
-  // Close the WebSocket server
-  wss.close(() => {
-    wsLog('✓ WebSocket server closed');
-  });
-  
-  // Clean up all client sessions
-  clientSessions.forEach((session) => {
-    stopRunningProcess(session, 'Killing running process...');
-    if (session.activeDebugSession) {
-      wsLog(`Killing debug session for client ${session.id}...`);
-      cleanActiveGdbSession(session);
+  try {
+    if (llamaServerProcess) {
+      llamaServerProcess.kill();
+      llamaServerProcess = null;
     }
-    cleanupClientFiles(session);
+  } catch (e) {}
+
+  // Close all WebSocket clients
+  try { wss.clients.forEach((client) => client.close(1001, 'Server shutting down')); } catch (e) {}
+
+  // Stop and cleanup client sessions
+  clientSessions.forEach((session) => {
+    try { stopRunningProcess(session, 'Killing running process...'); } catch (e) {}
+    try { if (session.activeDebugSession) cleanActiveGdbSession(session); } catch (e) {}
+    try { cleanupClientFiles(session); } catch (e) {}
   });
 
-  // Close the HTTP server
-  wsLog('Closing HTTP server...');
-  httpServer.close(() => {
-    wsLog('✓ HTTP server closed');
-    wsLog('Exiting...');
-    process.exit(0);
-  });
-  
-  setTimeout(() => {
-    wsLog('✗ Graceful shutdown timeout, forcing exit...');
-    process.exit(1);
-  }, 5000);
+  // Best-effort: remove remaining SessionFiles root to ensure no temp files remain
+  try {
+    const sessionsRoot = path.join(process.cwd(), 'SessionFiles');
+    if (fs.existsSync(sessionsRoot)) {
+      wsLog(`Deleting SessionFiles root: ${sessionsRoot}`);
+      fs.rmSync(sessionsRoot, { recursive: true, force: true });
+    }
+  } catch (e) {
+    console.error('Error removing SessionFiles root during shutdown:', e);
+  }
+
+  // Try to close servers quickly, then exit
+  try { httpServer && httpServer.close && httpServer.close(); } catch (e) {}
+
+  process.exit(0);
 }
 
 startServer().catch((error) => {
@@ -842,7 +874,13 @@ function handleDebug(session: ClientSession, codeString: string) {
 
       wsLog('✓ Debug build successful, initializing GDB...');
 
-      const gdbProcess = spawn('gdb', ['-q', '--interpreter=mi2', exeFilename]);
+      const gdbPath = requireGdbPath(session.ws);
+      if (!gdbPath) {
+        sendToClient(session.ws, 'Error', 'GDB not found. Debugging disabled.');
+        return;
+      }
+
+      const gdbProcess = spawn(gdbPath, ['-q', '--interpreter=mi2', exeFilename]);
 
       const debugSession: DebugSession = {
         gdbProcess,
@@ -867,7 +905,7 @@ function handleDebug(session: ClientSession, codeString: string) {
       gdbProcess.stdout?.on('data', (data: Buffer) => {
         try {
           const chunk = data.toString();
-          console.log(`[GDB E stdout] ${chunk}`);
+          wsLog(`[GDB E stdout] ${chunk}`);
           processGdbMiChunk(session.activeDebugSession!, chunk, "stdout");
           flushDebugOutput(session.activeDebugSession!, session.ws);
         } catch (e) {
@@ -878,7 +916,7 @@ function handleDebug(session: ClientSession, codeString: string) {
       gdbProcess.stderr?.on('data', (data: Buffer) => {
         try {
           const chunk = data.toString();
-          console.log(`[GDB E stderr] ${chunk}`);
+          wsLog(`[GDB E stderr] ${chunk}`);
           processGdbMiChunk(session.activeDebugSession!, chunk, "stderr");
           flushDebugOutput(session.activeDebugSession!, session.ws);
         } catch (e) {
@@ -1026,4 +1064,30 @@ function handleDebugStepInto(session: ClientSession) {
 
 function handleDebugStepOut(session: ClientSession) {
   handleDebugStep(session, "out");
+}
+
+function initializeLocalAi(localAiPort: number) {
+  // Encapsulate local AI startup so startup sequence is clearer
+  startLlamaServer(localAiPort);
+}
+
+function createAppAndClient() {
+  const app = express();
+  const geminiClient = createGeminiClient();
+  app.use(express.json());
+  registerAIRoutes(app, serverConfig, geminiClient);
+  return { app, geminiClient };
+}
+
+async function startHttpAndWs(app: express.Express) {
+  // Setup frontend (vite or static) then start listening and WebSocket server
+  await setupFrontend(app);
+
+  const httpServer = app.listen(serverConfig.appPort, "0.0.0.0", () => {
+    wsLog(`[HTTP] Server running on http://localhost:${serverConfig.appPort}`);
+  });
+
+  const wss = setupWebSocketServer(httpServer, serverConfig.wsPath);
+  registerShutdownHandlers(httpServer, wss);
+  return { httpServer, wss };
 }

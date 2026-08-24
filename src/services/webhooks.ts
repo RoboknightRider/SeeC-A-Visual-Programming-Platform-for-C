@@ -12,8 +12,10 @@ export function useGlobalTerminal(
   const isConnectingRef = useRef(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Log helper for debugging
+  // Log helper for debugging (no-op in production)
   const debugLog = useCallback((message: string) => {
+    const env = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env;
+    if (!env?.DEV) return;
     const timestamp = new Date().toISOString();
     console.log(`[useGlobalTerminal] [${timestamp}] ${message}`);
   }, []);

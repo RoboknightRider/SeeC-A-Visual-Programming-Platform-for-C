@@ -72,4 +72,5 @@ class TCCCompiler {
   }
 }
 
-export const compiler = new TCCCompiler();
+// Instantiate locally if needed; not exported to avoid unused export warnings
+const compiler = new TCCCompiler();
