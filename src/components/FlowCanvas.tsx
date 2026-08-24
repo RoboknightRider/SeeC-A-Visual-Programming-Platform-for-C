@@ -15,7 +15,7 @@ import {
   ConnectionLineType,
   useNodesInitialized,
 } from '@xyflow/react';
-import { X, Trash2, Layout, Code2 } from 'lucide-react';
+import { X, Trash2, Layout, Copy, Clipboard, Undo2, Redo2 } from 'lucide-react';
 import { BaseNode, NODE_REGISTRY, NodeData } from './Nodes';
 import { generateCCode } from '../services/codeGenerator';
 import { parseCodeToNodes } from '../services/codeParser';
@@ -287,6 +287,8 @@ const initialEdges: Edge[] = [];
 export type FlowCanvasActions = {
   addNode: (type: string) => void;
   layout: () => void;
+  undo: () => void;
+  redo: () => void;
   exportProject: () => string;
   importProject: (json: string) => void;
   importCode: (code: string) => Promise<void>;
@@ -300,11 +302,16 @@ const internalNodeTypes = Object.keys(NODE_REGISTRY).reduce((acc, key) => {
 interface FlowCanvasProps {
   onCodeChange: (code: string) => void;
   onNodesCountChange: (count: number) => void;
-  onOpenImportModal?: () => void;
   registerActions?: (actions: FlowCanvasActions | null) => void;
 }
 
-export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpenImportModal, registerActions }: FlowCanvasProps) => {
+type FlowSnapshot = { nodes: Node[]; edges: Edge[] };
+const HISTORY_LIMIT = 50;
+const cloneFlow = (nodes: Node[], edges: Edge[]): FlowSnapshot =>
+  JSON.parse(JSON.stringify({ nodes, edges })) as FlowSnapshot;
+const flowSignature = (flow: FlowSnapshot) => JSON.stringify(flow);
+
+export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, registerActions }: FlowCanvasProps) => {
   const { screenToFlowPosition, deleteElements, getNodes, getEdges, fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -313,6 +320,15 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
 
   const lastEdgesRef = useRef<string>('');
   const lastDataRef = useRef<string>('');
+  const historyRef = useRef<{ past: FlowSnapshot[]; future: FlowSnapshot[]; last: string; pending: string | null }>({
+    past: [],
+    future: [],
+    last: '',
+    pending: null,
+  });
+  const isApplyingHistoryRef = useRef(false);
+  const isDraggingRef = useRef(false);
+  const clipboardRef = useRef<string | null>(null);
 
   const triggerCodeGeneration = useCallback((forceNodes?: Node[], forceEdges?: Edge[]) => {
     const currentNodes = forceNodes || getNodes();
@@ -341,14 +357,136 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
     setTimeout(() => triggerCodeGeneration(forceNodes, forceEdges), 0);
   }, [triggerCodeGeneration]);
 
+  const recordHistory = useCallback(() => {
+    if (isApplyingHistoryRef.current) return;
+    const current = cloneFlow(getNodes(), getEdges());
+    const signature = flowSignature(current);
+    if (signature === historyRef.current.pending) return;
+    historyRef.current.past = [...historyRef.current.past, current].slice(-HISTORY_LIMIT);
+    historyRef.current.future = [];
+    historyRef.current.pending = signature;
+  }, [getEdges, getNodes]);
+
+  const applySnapshot = useCallback((snapshot: FlowSnapshot) => {
+    isApplyingHistoryRef.current = true;
+    setNodes(snapshot.nodes);
+    setEdges(snapshot.edges);
+    historyRef.current.last = flowSignature(snapshot);
+    historyRef.current.pending = null;
+    triggerCodeGeneration(snapshot.nodes, snapshot.edges);
+    setTimeout(() => { isApplyingHistoryRef.current = false; }, 0);
+  }, [setEdges, setNodes, triggerCodeGeneration]);
+
+  const undo = useCallback(() => {
+    const previous = historyRef.current.past.pop();
+    if (!previous) return;
+    historyRef.current.future.unshift(cloneFlow(getNodes(), getEdges()));
+    applySnapshot(previous);
+  }, [applySnapshot, getEdges, getNodes]);
+
+  const redo = useCallback(() => {
+    const next = historyRef.current.future.shift();
+    if (!next) return;
+    historyRef.current.past.push(cloneFlow(getNodes(), getEdges()));
+    applySnapshot(next);
+  }, [applySnapshot, getEdges, getNodes]);
+
+  const copySelection = useCallback(async () => {
+    const selectedNodes = getNodes().filter((node) => node.selected);
+    if (!selectedNodes.length) return;
+    const selectedIds = new Set(selectedNodes.map((node) => node.id));
+    const selectedEdges = getEdges().filter((edge) => selectedIds.has(edge.source) && selectedIds.has(edge.target));
+    const payload = JSON.stringify({ nodes: selectedNodes, edges: selectedEdges });
+    clipboardRef.current = payload;
+    try {
+      await navigator.clipboard.writeText(`seec-flow:${payload}`);
+    } catch {}
+  }, [getEdges, getNodes]);
+
+  const pasteSelection = useCallback(async () => {
+    let payload = clipboardRef.current;
+    try {
+      const clipboardText = await navigator.clipboard.readText();
+      if (clipboardText.startsWith('seec-flow:')) payload = clipboardText.slice('seec-flow:'.length);
+    } catch {}
+    if (!payload) return;
+
+    try {
+      const copied = JSON.parse(payload) as FlowSnapshot;
+      if (!copied.nodes?.length) return;
+      recordHistory();
+      const idMap = new Map(copied.nodes.map((node) => [node.id, Math.random().toString(36).slice(2, 11)]));
+      const minX = Math.min(...copied.nodes.map((node) => node.position.x));
+      const minY = Math.min(...copied.nodes.map((node) => node.position.y));
+      const pastedNodes = copied.nodes.map((node) => ({
+        ...node,
+        id: idMap.get(node.id)!,
+        selected: true,
+        position: { x: node.position.x - minX + 40, y: node.position.y - minY + 40 },
+      }));
+      const pastedEdges = copied.edges.map((edge) => ({
+        ...edge,
+        id: `e-${idMap.get(edge.source)}-${idMap.get(edge.target)}-${Math.random().toString(36).slice(2, 7)}`,
+        source: idMap.get(edge.source)!,
+        target: idMap.get(edge.target)!,
+      }));
+      const nextNodes = getNodes().map((node) => ({ ...node, selected: false })).concat(pastedNodes);
+      const nextEdges = getEdges().concat(pastedEdges);
+      setNodes(nextNodes);
+      setEdges(nextEdges);
+      historyRef.current.last = flowSignature(cloneFlow(nextNodes, nextEdges));
+      triggerCodeGeneration(nextNodes, nextEdges);
+    } catch {}
+  }, [getEdges, getNodes, recordHistory, setEdges, setNodes, triggerCodeGeneration]);
+
   useEffect(() => {
     triggerCodeGeneration();
     const handleDataChange = () => triggerCodeGeneration();
+    const handleBeforeDataChange = () => recordHistory();
     window.addEventListener('seec-data-change', handleDataChange);
-    return () => window.removeEventListener('seec-data-change', handleDataChange);
-  }, [triggerCodeGeneration]);
+    window.addEventListener('seec-before-data-change', handleBeforeDataChange);
+    return () => {
+      window.removeEventListener('seec-data-change', handleDataChange);
+      window.removeEventListener('seec-before-data-change', handleBeforeDataChange);
+    };
+  }, [recordHistory, triggerCodeGeneration]);
+
+  useEffect(() => {
+    historyRef.current.last = flowSignature(cloneFlow(nodes, edges));
+    historyRef.current.pending = null;
+  }, [edges, nodes]);
+
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null) => {
+      const element = target as HTMLElement | null;
+      return element?.tagName === 'INPUT' || element?.tagName === 'TEXTAREA' || element?.tagName === 'SELECT' || element?.isContentEditable;
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return;
+      const modifier = event.ctrlKey || event.metaKey;
+      if (!modifier) return;
+      if (event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        event.shiftKey ? redo() : undo();
+      } else if (event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redo();
+      } else if (event.key.toLowerCase() === 'c') {
+        void copySelection();
+      } else if (event.key.toLowerCase() === 'v') {
+        event.preventDefault();
+        void pasteSelection();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [copySelection, pasteSelection, redo, undo]);
 
   const onNodesChangeInternal = useCallback((changes: any) => {
+    const hasHistoryChange = changes.some((change: any) => change.type !== 'select' && change.type !== 'position');
+    if (hasHistoryChange && !isDraggingRef.current) {
+      recordHistory();
+    }
     onNodesChange(changes);
     const hasSignificantChange = changes.some((c: any) => 
       c.type === 'add' || c.type === 'remove' || c.type === 'reset' || c.type === 'data'
@@ -356,9 +494,10 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
     if (hasSignificantChange) {
       triggerCodeGeneration();
     }
-  }, [onNodesChange, triggerCodeGeneration]);
+  }, [onNodesChange, recordHistory, triggerCodeGeneration]);
 
   const onEdgesChangeInternal = useCallback((changes: any) => {
+    if (changes.some((change: any) => change.type !== 'select')) recordHistory();
     onEdgesChange(changes);
     const hasSignificantChange = changes.some((c: any) => 
       c.type === 'add' || c.type === 'remove' || c.type === 'reset'
@@ -366,10 +505,11 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
     if (hasSignificantChange) {
       triggerCodeGeneration();
     }
-  }, [onEdgesChange, triggerCodeGeneration]);
+  }, [onEdgesChange, recordHistory, triggerCodeGeneration]);
 
   const onConnect = useCallback(
     (params: Connection) => {
+      recordHistory();
       setEdges((eds) => {
         const filteredEdges = eds.filter(
           (edge) =>
@@ -381,18 +521,19 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
         return newEdges;
       });
     },
-    [queueCodeGeneration, setEdges]
+    [queueCodeGeneration, recordHistory, setEdges]
   );
 
   const onEdgeDoubleClick = useCallback(
     (_: React.MouseEvent, edge: Edge) => {
+      recordHistory();
       setEdges((eds) => {
         const newEdges = eds.filter((e) => e.id !== edge.id);
         queueCodeGeneration();
         return newEdges;
       });
     },
-    [queueCodeGeneration, setEdges]
+    [queueCodeGeneration, recordHistory, setEdges]
   );
 
   const isValidConnection = useCallback(
@@ -421,6 +562,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
   );
 
   const addNode = useCallback((type: string, position?: { x: number, y: number }) => {
+    recordHistory();
     const id = Math.random().toString(36).slice(2, 11);
     const registryItem = NODE_REGISTRY[type];
 
@@ -450,7 +592,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
       queueCodeGeneration(nextNodes, getEdges());
       return nextNodes;
     });
-  }, [getEdges, queueCodeGeneration, screenToFlowPosition, setNodes]);
+  }, [getEdges, queueCodeGeneration, recordHistory, screenToFlowPosition, setNodes]);
 
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
@@ -474,6 +616,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
   );
 
   const handleLayout = useCallback((direction?: string, forceNodes?: Node[], forceEdges?: Edge[]) => {
+    recordHistory();
     const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
       forceNodes || getNodes(),
       forceEdges || getEdges(),
@@ -483,25 +626,40 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
     setEdges([...layoutedEdges]);
     triggerCodeGeneration(layoutedNodes as unknown as Node[], layoutedEdges as unknown as Edge[]);
     setTimeout(() => fitView({ padding: 0.2, duration: 800 }), 50);
-  }, [fitView, getEdges, getNodes, setEdges, setNodes, triggerCodeGeneration]);
+  }, [fitView, getEdges, getNodes, recordHistory, setEdges, setNodes, triggerCodeGeneration]);
 
   const handleDeleteSelection = useCallback(() => {
     const selectedNodes = getNodes().filter((node) => node.selected);
     const selectedEdges = getEdges().filter((edge) => edge.selected);
+    if (!selectedNodes.length && !selectedEdges.length) return;
+    recordHistory();
     deleteElements({ nodes: selectedNodes, edges: selectedEdges });
     queueCodeGeneration();
-  }, [deleteElements, getEdges, getNodes, queueCodeGeneration]);
+  }, [deleteElements, getEdges, getNodes, queueCodeGeneration, recordHistory]);
 
   const handleClearCanvas = useCallback(() => {
+    recordHistory();
     setNodes([]);
     setEdges([]);
     triggerCodeGeneration([], []);
-  }, [setEdges, setNodes, triggerCodeGeneration]);
+  }, [recordHistory, setEdges, setNodes, triggerCodeGeneration]);
+
+  const handleNodeDragStart = useCallback(() => {
+    isDraggingRef.current = true;
+    recordHistory();
+  }, [recordHistory]);
+
+  const handleNodeDragStop = useCallback(() => {
+    isDraggingRef.current = false;
+    triggerCodeGeneration();
+  }, [triggerCodeGeneration]);
 
   useEffect(() => {
     const actions: FlowCanvasActions = {
       addNode,
       layout: handleLayout,
+      undo,
+      redo,
       exportProject: () => {
         const flow = {
           nodes: getNodes(),
@@ -515,6 +673,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
           const flow = JSON.parse(json);
           const newNodes = flow.nodes || [];
           const newEdges = flow.edges || [];
+          recordHistory();
           setNodes(newNodes);
           setEdges(newEdges);
           triggerCodeGeneration(newNodes, newEdges);
@@ -529,6 +688,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
           const { nodes: newNodes, edges: newEdges } = parseCodeToNodes(code);
 
           if (newNodes.length > 0) {
+            recordHistory();
             setNodes(newNodes);
             setEdges(newEdges);
             setTimeout(() => {
@@ -550,7 +710,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
     return () => {
       registerActions?.(null);
     };
-  }, [addNode, fitView, getEdges, getNodes, handleLayout, registerActions, setEdges, setNodes, triggerCodeGeneration]);
+  }, [addNode, fitView, getEdges, getNodes, handleLayout, redo, recordHistory, registerActions, setEdges, setNodes, triggerCodeGeneration, undo]);
 
   const hasAutoLayoutedRef = useRef(false);
   useEffect(() => {
@@ -566,6 +726,8 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
       edges={edges}
       onNodesChange={onNodesChangeInternal}
       onEdgesChange={onEdgesChangeInternal}
+      onNodeDragStart={handleNodeDragStart}
+      onNodeDragStop={handleNodeDragStop}
       onConnect={onConnect}
       onEdgeDoubleClick={onEdgeDoubleClick}
       onDrop={onDrop}
@@ -601,12 +763,34 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, onOpen
             <Layout size={18} />
           </button>
           <div className="w-px h-4 bg-zinc-800 my-auto mx-1" />
-          <button 
-            onClick={() => onOpenImportModal?.()}
+          <button
+            onClick={undo}
             className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 transition-colors"
-            title="Code to Nodes"
+            title="Undo (Ctrl+Z)"
           >
-            <Code2 size={18} />
+            <Undo2 size={18} />
+          </button>
+          <button
+            onClick={redo}
+            className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 transition-colors"
+            title="Redo (Ctrl+Y)"
+          >
+            <Redo2 size={18} />
+          </button>
+          <div className="w-px h-4 bg-zinc-800 my-auto mx-1" />
+          <button
+            onClick={() => void copySelection()}
+            className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 transition-colors"
+            title="Copy Selected (Ctrl+C)"
+          >
+            <Copy size={18} />
+          </button>
+          <button
+            onClick={() => void pasteSelection()}
+            className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 transition-colors"
+            title="Paste Nodes (Ctrl+V)"
+          >
+            <Clipboard size={18} />
           </button>
           <div className="w-px h-4 bg-zinc-800 my-auto mx-1" />
           <button 

@@ -13,7 +13,7 @@ import {
   Terminal, Code, X, Copy, Check, Cpu,
   ChevronLeft, ChevronRight, Box, Play, Download,
   Settings, Bug, GitPullRequest, Activity, Variable, Eraser,
-  Code2, MessageSquare, Square, SkipForward
+  RefreshCw, MessageSquare, Square, SkipForward
 } from 'lucide-react';
 
 const toolbarButtonClass = "flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap";
@@ -486,7 +486,9 @@ const CodePreview = React.memo(({
   codePanelOpen,
   setCodePanelOpen,
   generatedCode,
+  onCodeChange,
   copyToClipboard,
+  reloadCodeToNodes,
   copied,
   nodesCount,
   isCurrentlyDebugging,
@@ -495,7 +497,9 @@ const CodePreview = React.memo(({
   codePanelOpen: boolean;
   setCodePanelOpen: (open: boolean) => void;
   generatedCode: string;
+  onCodeChange: (code: string) => void;
   copyToClipboard: () => void;
+  reloadCodeToNodes: () => void;
   copied: boolean;
   nodesCount: number;
   isCurrentlyDebugging: boolean;
@@ -519,39 +523,36 @@ const CodePreview = React.memo(({
         {codePanelOpen && <span className="text-sm font-bold text-zinc-100 truncate">Generated C Code</span>}
       </div>
       {codePanelOpen && (
-        <button
-          onClick={copyToClipboard}
-          className="flex items-center gap-2 px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-300 transition-all border border-zinc-700"
-        >
-          {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
-          {copied ? 'Copied!' : 'Copy'}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={reloadCodeToNodes}
+            className="p-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-all border border-zinc-700"
+            title="Reload code into nodes"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={copyToClipboard}
+            className="flex items-center gap-2 px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-300 transition-all border border-zinc-700"
+            title="Copy generated code"
+          >
+            {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+        </div>
       )}
     </div>
 
     {codePanelOpen && (
       <>
-        <div className="flex-1 overflow-auto p-4 font-mono text-sm">
-          <pre className="text-emerald-400/90 leading-relaxed">
-            {generatedCode
-              .replace(/\r/g, "")
-              .split("\n")
-              .map((line, index) => {
-                const lineNumber = index + 1;
-                const isActiveLine = isCurrentlyDebugging && currentDebugLine === lineNumber;
-                return (
-                  <div
-                    key={`code-line-${index}`}
-                    className={cn(
-                      "whitespace-pre",
-                      isActiveLine && "bg-emerald-500/10 text-emerald-100"
-                    )}
-                  >
-                    {line || "\u00A0"}
-                  </div>
-                );
-              })}
-          </pre>
+        <div className="flex-1 min-h-0 overflow-auto p-4 font-mono text-sm">
+          <textarea
+            value={generatedCode}
+            onChange={(event) => onCodeChange(event.target.value)}
+            spellCheck={false}
+            aria-label="Editable generated C code"
+            className="w-full h-full min-h-[16rem] resize-none bg-transparent text-emerald-400/90 leading-relaxed outline-none"
+          />
         </div>
         <div className="p-4 bg-zinc-900/80 border-t border-zinc-800">
           <div className="flex items-center gap-2 text-zinc-500 text-[10px] uppercase font-bold tracking-widest mb-2">
@@ -595,17 +596,11 @@ function Flow() {
 
   // Chat / import modal state
   const [showChat, setShowChat] = useState(false);
-  const [isCodeModalOpen, setIsCodeModalOpen] = useState(false);
-  const [importCodeValue, setImportCodeValue] = useState('');
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const flowActionsRef = React.useRef<import('./components/FlowCanvas').FlowCanvasActions | null>(null);
 
   const registerFlowActions = React.useCallback((actions: import('./components/FlowCanvas').FlowCanvasActions | null) => {
     flowActionsRef.current = actions;
-  }, []);
-
-  const handleOpenImportModal = React.useCallback(() => {
-    setIsCodeModalOpen(true);
   }, []);
 
   const handleAskAI = useCallback(() => {
@@ -650,6 +645,12 @@ function Flow() {
     navigator.clipboard.writeText(generatedCode);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }, [generatedCode]);
+
+  const reloadCodeToNodes = useCallback(() => {
+    if (generatedCode.trim()) {
+      void flowActionsRef.current?.importCode(generatedCode);
+    }
   }, [generatedCode]);
 
   const downloadAsCFile = useCallback(() => {
@@ -937,7 +938,6 @@ function Flow() {
               onCodeChange={setGeneratedCode}
               onNodesCountChange={setNodesCount}
               registerActions={registerFlowActions}
-              onOpenImportModal={handleOpenImportModal}
             />
           </div>
 
@@ -960,7 +960,9 @@ function Flow() {
           codePanelOpen={codePanelOpen}
           setCodePanelOpen={setCodePanelOpen}
           generatedCode={generatedCode}
+          onCodeChange={setGeneratedCode}
           copyToClipboard={copyToClipboard}
+          reloadCodeToNodes={reloadCodeToNodes}
           copied={copied}
           nodesCount={nodesCount}
           isCurrentlyDebugging={isCurrentlyDebugging}
@@ -977,62 +979,6 @@ function Flow() {
         clearInitialError={() => setActiveErrorLog('')}
       />
 
-      {/* Code Import Modal */}
-      {isCodeModalOpen && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm p-3 sm:p-6">
-          {/* 1. Modal Card: Constrained max height so it fits on screen */}
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl w-full max-w-2xl h-[85vh] min-h-[22rem] max-h-[40rem] flex flex-col overflow-hidden">
-            
-            {/* 2. Header: Fixed height with shrink-0 */}
-            <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between shrink-0 bg-zinc-900">
-              <div className="flex items-center gap-2">
-                <Code2 className="text-emerald-500 w-5 h-5" />
-                <h3 className="text-lg font-bold text-white">Import C Code</h3>
-              </div>
-              <button
-                onClick={() => setIsCodeModalOpen(false)}
-                className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors"
-              >
-                <X size={20} />
-              </button>
-            </div>
-
-            {/* 3. Textarea Wrapper: flex-1 + min-h-0 allows the textarea inside to shrink/grow */}
-            <div className="p-3 sm:p-4 flex-1 min-h-0 flex flex-col bg-zinc-900">
-              <textarea
-                value={importCodeValue}
-                onChange={(e) => setImportCodeValue(e.target.value)}
-                placeholder={`Paste your C code below to generate nodes from it.\nExample:\nint main() {\n  int x = 10;\n  printf("Value is %d", x);\n  return 0;\n}`}
-                className="w-full h-full resize-none bg-black/40 border border-zinc-800 rounded-lg p-3 font-mono text-sm text-emerald-400/90 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 overflow-auto"
-              />
-            </div>
-
-            {/* 4. Footer: Fixed height with shrink-0 */}
-            <div className="px-4 py-3 border-t border-zinc-800 flex justify-end gap-2 bg-zinc-900/50 shrink-0">
-              <button
-                onClick={() => setIsCodeModalOpen(false)}
-                className="px-4 py-2 rounded-lg hover:bg-zinc-800 text-zinc-400 text-sm font-medium transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  if (importCodeValue.trim()) {
-                    flowActionsRef.current?.importCode(importCodeValue);
-                    setIsCodeModalOpen(false);
-                    setImportCodeValue('');
-                  }
-                }}
-                disabled={!importCodeValue.trim()}
-                className="px-6 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white text-sm font-bold transition-all shadow-lg shadow-emerald-900/20 flex items-center gap-2"
-              >
-                Generate Nodes
-              </button>
-            </div>
-
-          </div>
-        </div>
-      )}
     </div>
   );
 }

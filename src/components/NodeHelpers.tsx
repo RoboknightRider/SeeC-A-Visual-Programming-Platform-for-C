@@ -197,6 +197,7 @@ export const GenericNode = React.memo((props: any) => {
   }, []);
 
   const updateData = useCallback((key: string, val: string) => {
+    window.dispatchEvent(new CustomEvent('seec-before-data-change'));
     setNodes((nds) =>
       nds.map((node) => {
         if (node.id === id) {
