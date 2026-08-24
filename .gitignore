@@ -4,3 +4,4 @@ SessionFiles/
 models/*
 !models/
 gcc/*
+dist/*

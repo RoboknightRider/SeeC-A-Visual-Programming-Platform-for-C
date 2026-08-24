@@ -6,10 +6,6 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
- * Removes ANSI escape codes from a string.
- * Useful for cleaning up compiler output.
- */
-/**
  * Formats a date to a locale time string for logging.
  */
 export const getTimestamp = (): string => {

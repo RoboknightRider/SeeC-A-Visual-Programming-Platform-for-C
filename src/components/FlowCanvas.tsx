@@ -291,7 +291,7 @@ export type FlowCanvasActions = {
   redo: () => void;
   exportProject: () => string;
   importProject: (json: string) => void;
-  importCode: (code: string) => Promise<void>;
+  importCode: (code: string) => void;
 };
 
 const internalNodeTypes = Object.keys(NODE_REGISTRY).reduce((acc, key) => {
@@ -302,6 +302,7 @@ const internalNodeTypes = Object.keys(NODE_REGISTRY).reduce((acc, key) => {
 interface FlowCanvasProps {
   onCodeChange: (code: string) => void;
   onNodesCountChange: (count: number) => void;
+  editingDisabled: boolean;
   registerActions?: (actions: FlowCanvasActions | null) => void;
 }
 
@@ -311,7 +312,7 @@ const cloneFlow = (nodes: Node[], edges: Edge[]): FlowSnapshot =>
   JSON.parse(JSON.stringify({ nodes, edges })) as FlowSnapshot;
 const flowSignature = (flow: FlowSnapshot) => JSON.stringify(flow);
 
-export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, registerActions }: FlowCanvasProps) => {
+export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editingDisabled, registerActions }: FlowCanvasProps) => {
   const { screenToFlowPosition, deleteElements, getNodes, getEdges, fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -320,10 +321,9 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
 
   const lastEdgesRef = useRef<string>('');
   const lastDataRef = useRef<string>('');
-  const historyRef = useRef<{ past: FlowSnapshot[]; future: FlowSnapshot[]; last: string; pending: string | null }>({
+  const historyRef = useRef<{ past: FlowSnapshot[]; future: FlowSnapshot[]; pending: string | null }>({
     past: [],
     future: [],
-    last: '',
     pending: null,
   });
   const isApplyingHistoryRef = useRef(false);
@@ -371,7 +371,6 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
     isApplyingHistoryRef.current = true;
     setNodes(snapshot.nodes);
     setEdges(snapshot.edges);
-    historyRef.current.last = flowSignature(snapshot);
     historyRef.current.pending = null;
     triggerCodeGeneration(snapshot.nodes, snapshot.edges);
     setTimeout(() => { isApplyingHistoryRef.current = false; }, 0);
@@ -404,6 +403,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
   }, [getEdges, getNodes]);
 
   const pasteSelection = useCallback(async () => {
+    if (editingDisabled) return;
     let payload = clipboardRef.current;
     try {
       const clipboardText = await navigator.clipboard.readText();
@@ -434,10 +434,9 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
       const nextEdges = getEdges().concat(pastedEdges);
       setNodes(nextNodes);
       setEdges(nextEdges);
-      historyRef.current.last = flowSignature(cloneFlow(nextNodes, nextEdges));
       triggerCodeGeneration(nextNodes, nextEdges);
     } catch {}
-  }, [getEdges, getNodes, recordHistory, setEdges, setNodes, triggerCodeGeneration]);
+  }, [editingDisabled, getEdges, getNodes, recordHistory, setEdges, setNodes, triggerCodeGeneration]);
 
   useEffect(() => {
     triggerCodeGeneration();
@@ -452,7 +451,6 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
   }, [recordHistory, triggerCodeGeneration]);
 
   useEffect(() => {
-    historyRef.current.last = flowSignature(cloneFlow(nodes, edges));
     historyRef.current.pending = null;
   }, [edges, nodes]);
 
@@ -462,7 +460,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
       return element?.tagName === 'INPUT' || element?.tagName === 'TEXTAREA' || element?.tagName === 'SELECT' || element?.isContentEditable;
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (isEditableTarget(event.target)) return;
+      if (editingDisabled || isEditableTarget(event.target)) return;
       const modifier = event.ctrlKey || event.metaKey;
       if (!modifier) return;
       if (event.key.toLowerCase() === 'z') {
@@ -480,9 +478,10 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [copySelection, pasteSelection, redo, undo]);
+  }, [copySelection, editingDisabled, pasteSelection, redo, undo]);
 
   const onNodesChangeInternal = useCallback((changes: any) => {
+    if (editingDisabled) return;
     const hasHistoryChange = changes.some((change: any) => change.type !== 'select' && change.type !== 'position');
     if (hasHistoryChange && !isDraggingRef.current) {
       recordHistory();
@@ -494,9 +493,10 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
     if (hasSignificantChange) {
       triggerCodeGeneration();
     }
-  }, [onNodesChange, recordHistory, triggerCodeGeneration]);
+  }, [editingDisabled, onNodesChange, recordHistory, triggerCodeGeneration]);
 
   const onEdgesChangeInternal = useCallback((changes: any) => {
+    if (editingDisabled) return;
     if (changes.some((change: any) => change.type !== 'select')) recordHistory();
     onEdgesChange(changes);
     const hasSignificantChange = changes.some((c: any) => 
@@ -505,10 +505,11 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
     if (hasSignificantChange) {
       triggerCodeGeneration();
     }
-  }, [onEdgesChange, recordHistory, triggerCodeGeneration]);
+  }, [editingDisabled, onEdgesChange, recordHistory, triggerCodeGeneration]);
 
   const onConnect = useCallback(
     (params: Connection) => {
+      if (editingDisabled) return;
       recordHistory();
       setEdges((eds) => {
         const filteredEdges = eds.filter(
@@ -521,11 +522,12 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
         return newEdges;
       });
     },
-    [queueCodeGeneration, recordHistory, setEdges]
+    [editingDisabled, queueCodeGeneration, recordHistory, setEdges]
   );
 
   const onEdgeDoubleClick = useCallback(
     (_: React.MouseEvent, edge: Edge) => {
+      if (editingDisabled) return;
       recordHistory();
       setEdges((eds) => {
         const newEdges = eds.filter((e) => e.id !== edge.id);
@@ -533,7 +535,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
         return newEdges;
       });
     },
-    [queueCodeGeneration, recordHistory, setEdges]
+    [editingDisabled, queueCodeGeneration, recordHistory, setEdges]
   );
 
   const isValidConnection = useCallback(
@@ -562,6 +564,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
   );
 
   const addNode = useCallback((type: string, position?: { x: number, y: number }) => {
+    if (editingDisabled) return;
     recordHistory();
     const id = Math.random().toString(36).slice(2, 11);
     const registryItem = NODE_REGISTRY[type];
@@ -592,7 +595,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
       queueCodeGeneration(nextNodes, getEdges());
       return nextNodes;
     });
-  }, [getEdges, queueCodeGeneration, recordHistory, screenToFlowPosition, setNodes]);
+  }, [editingDisabled, getEdges, queueCodeGeneration, recordHistory, screenToFlowPosition, setNodes]);
 
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
@@ -602,6 +605,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
   const onDrop = useCallback(
     (event: React.DragEvent) => {
       event.preventDefault();
+      if (editingDisabled) return;
       const type = event.dataTransfer.getData('application/reactflow');
       if (!type) return;
 
@@ -612,10 +616,11 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
 
       addNode(type, position);
     },
-    [screenToFlowPosition, addNode]
+    [editingDisabled, screenToFlowPosition, addNode]
   );
 
   const handleLayout = useCallback((direction?: string, forceNodes?: Node[], forceEdges?: Edge[]) => {
+    if (editingDisabled) return;
     recordHistory();
     const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
       forceNodes || getNodes(),
@@ -626,23 +631,25 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
     setEdges([...layoutedEdges]);
     triggerCodeGeneration(layoutedNodes as unknown as Node[], layoutedEdges as unknown as Edge[]);
     setTimeout(() => fitView({ padding: 0.2, duration: 800 }), 50);
-  }, [fitView, getEdges, getNodes, recordHistory, setEdges, setNodes, triggerCodeGeneration]);
+  }, [editingDisabled, fitView, getEdges, getNodes, recordHistory, setEdges, setNodes, triggerCodeGeneration]);
 
   const handleDeleteSelection = useCallback(() => {
+    if (editingDisabled) return;
     const selectedNodes = getNodes().filter((node) => node.selected);
     const selectedEdges = getEdges().filter((edge) => edge.selected);
     if (!selectedNodes.length && !selectedEdges.length) return;
     recordHistory();
     deleteElements({ nodes: selectedNodes, edges: selectedEdges });
     queueCodeGeneration();
-  }, [deleteElements, getEdges, getNodes, queueCodeGeneration, recordHistory]);
+  }, [deleteElements, editingDisabled, getEdges, getNodes, queueCodeGeneration, recordHistory]);
 
   const handleClearCanvas = useCallback(() => {
+    if (editingDisabled) return;
     recordHistory();
     setNodes([]);
     setEdges([]);
     triggerCodeGeneration([], []);
-  }, [recordHistory, setEdges, setNodes, triggerCodeGeneration]);
+  }, [editingDisabled, recordHistory, setEdges, setNodes, triggerCodeGeneration]);
 
   const handleNodeDragStart = useCallback(() => {
     isDraggingRef.current = true;
@@ -669,6 +676,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
         return JSON.stringify(flow, null, 2);
       },
       importProject: (json: string) => {
+        if (editingDisabled) return;
         try {
           const flow = JSON.parse(json);
           const newNodes = flow.nodes || [];
@@ -683,7 +691,8 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
           alert('Invalid project file');
         }
       },
-      importCode: async (code: string) => {
+      importCode: (code: string) => {
+        if (editingDisabled) return;
         try {
           const { nodes: newNodes, edges: newEdges } = parseCodeToNodes(code);
 
@@ -710,7 +719,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
     return () => {
       registerActions?.(null);
     };
-  }, [addNode, fitView, getEdges, getNodes, handleLayout, redo, recordHistory, registerActions, setEdges, setNodes, triggerCodeGeneration, undo]);
+  }, [addNode, editingDisabled, fitView, getEdges, getNodes, handleLayout, redo, recordHistory, registerActions, setEdges, setNodes, triggerCodeGeneration, undo]);
 
   const hasAutoLayoutedRef = useRef(false);
   useEffect(() => {
@@ -746,8 +755,13 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
       snapToGrid={true}
       snapGrid={[GRID_SIZE, GRID_SIZE]}
       onlyRenderVisibleElements={true}
-      deleteKeyCode={['Backspace', 'Delete']}
-      className="bg-zinc-950"
+      nodesDraggable={!editingDisabled}
+      nodesConnectable={!editingDisabled}
+      elementsSelectable={!editingDisabled}
+      selectionOnDrag={false}
+      panOnDrag={true}
+      deleteKeyCode={editingDisabled ? null : ['Backspace', 'Delete']}
+      className={editingDisabled ? 'bg-zinc-950 seec-execution-view' : 'bg-zinc-950'}
     >
       <Background color="#27272a" variant={undefined} gap={GRID_SIZE} />
       <Controls />
@@ -757,6 +771,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
         <div className="bg-zinc-900/80 backdrop-blur-md border border-zinc-800 p-2 rounded-lg flex gap-2">
           <button 
             onClick={() => handleLayout()}
+            disabled={editingDisabled}
             className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 transition-colors"
             title="Auto Layout"
           >
@@ -765,6 +780,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
           <div className="w-px h-4 bg-zinc-800 my-auto mx-1" />
           <button
             onClick={undo}
+            disabled={editingDisabled}
             className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 transition-colors"
             title="Undo (Ctrl+Z)"
           >
@@ -772,6 +788,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
           </button>
           <button
             onClick={redo}
+            disabled={editingDisabled}
             className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 transition-colors"
             title="Redo (Ctrl+Y)"
           >
@@ -787,6 +804,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
           </button>
           <button
             onClick={() => void pasteSelection()}
+            disabled={editingDisabled}
             className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 transition-colors"
             title="Paste Nodes (Ctrl+V)"
           >
@@ -795,6 +813,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
           <div className="w-px h-4 bg-zinc-800 my-auto mx-1" />
           <button 
             onClick={handleDeleteSelection}
+            disabled={editingDisabled}
             className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-red-400 transition-colors"
             title="Delete Selected"
           >
@@ -803,6 +822,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, regist
           <div className="w-px h-4 bg-zinc-800 my-auto mx-1" />
           <button 
             onClick={handleClearCanvas}
+            disabled={editingDisabled}
             className="p-2 hover:bg-zinc-800 rounded text-zinc-400 hover:text-red-400 transition-colors"
             title="Clear Canvas"
           >

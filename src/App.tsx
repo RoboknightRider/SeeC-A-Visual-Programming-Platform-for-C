@@ -489,6 +489,7 @@ const CodePreview = React.memo(({
   onCodeChange,
   copyToClipboard,
   reloadCodeToNodes,
+  editingDisabled,
   copied,
   nodesCount,
   isCurrentlyDebugging,
@@ -500,6 +501,7 @@ const CodePreview = React.memo(({
   onCodeChange: (code: string) => void;
   copyToClipboard: () => void;
   reloadCodeToNodes: () => void;
+  editingDisabled: boolean;
   copied: boolean;
   nodesCount: number;
   isCurrentlyDebugging: boolean;
@@ -526,6 +528,7 @@ const CodePreview = React.memo(({
         <div className="flex items-center gap-1">
           <button
             onClick={reloadCodeToNodes}
+            disabled={editingDisabled}
             className="p-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-all border border-zinc-700"
             title="Reload code into nodes"
           >
@@ -545,13 +548,38 @@ const CodePreview = React.memo(({
 
     {codePanelOpen && (
       <>
-        <div className="flex-1 min-h-0 overflow-auto p-4 font-mono text-sm">
+        <div className="relative flex-1 min-h-0 overflow-hidden p-4 font-mono text-sm">
+          <pre
+            aria-hidden="true"
+            className="absolute inset-4 overflow-hidden text-emerald-400/90 leading-relaxed pointer-events-none"
+          >
+            {generatedCode.replace(/\r/g, '').split('\n').map((line, index) => {
+              const lineNumber = index + 1;
+              const isActiveLine = isCurrentlyDebugging && currentDebugLine === lineNumber;
+              return (
+                <div
+                  key={`code-line-${index}`}
+                  className={cn('whitespace-pre', isActiveLine && 'bg-emerald-500/20 text-emerald-100')}
+                >
+                  {line || '\u00A0'}
+                </div>
+              );
+            })}
+          </pre>
           <textarea
             value={generatedCode}
             onChange={(event) => onCodeChange(event.target.value)}
+            disabled={editingDisabled}
+            onScroll={(event) => {
+              const highlightLayer = event.currentTarget.previousElementSibling as HTMLElement | null;
+              if (highlightLayer) {
+                highlightLayer.scrollTop = event.currentTarget.scrollTop;
+                highlightLayer.scrollLeft = event.currentTarget.scrollLeft;
+              }
+            }}
             spellCheck={false}
             aria-label="Editable generated C code"
-            className="w-full h-full min-h-[16rem] resize-none bg-transparent text-emerald-400/90 leading-relaxed outline-none"
+            className="relative w-full h-full min-h-[16rem] resize-none bg-transparent text-transparent caret-emerald-400 selection:bg-emerald-500/30 leading-relaxed outline-none overflow-auto"
           />
         </div>
         <div className="p-4 bg-zinc-900/80 border-t border-zinc-800">
@@ -649,9 +677,11 @@ function Flow() {
 
   const reloadCodeToNodes = useCallback(() => {
     if (generatedCode.trim()) {
-      void flowActionsRef.current?.importCode(generatedCode);
+      flowActionsRef.current?.importCode(generatedCode);
     }
   }, [generatedCode]);
+
+  const editingDisabled = isRunning || isDebugMode || isCurrentlyDebugging;
 
   const downloadAsCFile = useCallback(() => {
     (async () => {
@@ -937,6 +967,7 @@ function Flow() {
             <FlowCanvas
               onCodeChange={setGeneratedCode}
               onNodesCountChange={setNodesCount}
+              editingDisabled={editingDisabled}
               registerActions={registerFlowActions}
             />
           </div>
@@ -963,6 +994,7 @@ function Flow() {
           onCodeChange={setGeneratedCode}
           copyToClipboard={copyToClipboard}
           reloadCodeToNodes={reloadCodeToNodes}
+          editingDisabled={editingDisabled}
           copied={copied}
           nodesCount={nodesCount}
           isCurrentlyDebugging={isCurrentlyDebugging}
