@@ -1,5 +1,5 @@
 {
   "name": "SeeC",
-  "description": "A node-based visual programming environment for generating C code. Drag, drop, and connect logic blocks to build C programs that run directly in your browser using a WebAssembly-based C compiler.",
+  "description": "A node-based visual programming environment for generating C code. Drag, drop, and connect logic blocks to build C programs visually. SeeC simplifies coding for beginners and work as a learning tool",
   "requestFramePermissions": []
 }
