@@ -459,11 +459,11 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     label: 'Variable',
     category: 'Data',
     layout: 'horizontal',
-    defaultData: { varName: 'x', varType: 'int', value: '0' },
+    defaultData: { varName: 'x', varType: 'int', value: '' },
     fields: [
       { key: 'varType', label: 'Type', type: 'type-selector' },
       { key: 'varName', label: 'Name', type: 'text', placeholder: 'x' },
-      { key: 'value', label: 'Value', type: 'text', placeholder: '0', connectable: true }
+      { key: 'value', label: 'Value', type: 'text', placeholder: '', connectable: true }
     ],
     syntax: [
       '{{varType}} {{varName}} = {{value}};',
@@ -472,7 +472,18 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     toCode: ({ node, indentLevel, getFieldValue }) => {
       const data = node.data as unknown as NodeData;
       const value = getFieldValue('value');
-      return `${getIndent(indentLevel)}${data.varType || 'int'} ${data.varName || 'x'} = ${value || '0'};\n`;
+      const indent = getIndent(indentLevel);
+      const varType = data.varType || 'int';
+      const varName = data.varName || 'x';
+
+      // Check if value is defined and non-empty (ignoring whitespace)
+      const hasValue = value !== undefined && value !== null && String(value).trim() !== '';
+
+      if (hasValue) {
+        return `${indent}${varType} ${varName} = ${value};\n`;
+      } else {
+        return `${indent}${varType} ${varName};\n`;
+      }
     },
     toExpression: ({ node }) => {
       const data = node.data as unknown as NodeData;
@@ -486,17 +497,32 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     label: 'Array',
     category: 'Data',
     layout: 'horizontal',
-    defaultData: { varName: 'arr', varType: 'int', size: '10', value: '1, 2, 3' },
+    defaultData: { varName: 'arr', varType: 'int', size: '10', value: '' },
     fields: [
       { key: 'varType', label: 'Type', type: 'type-selector' },
       { key: 'varName', label: 'Name', type: 'text', placeholder: 'arr' },
       { key: 'size', label: 'Size', type: 'text', placeholder: '10' },
-      { key: 'value', label: 'Initial Values', type: 'text', placeholder: '1, 2, 3' }
+      { key: 'value', label: 'Initial Values', type: 'text', placeholder: '' }
     ],
-    syntax: '{{varType}} {{varName}}[{{size}}] = { {{value}} };',
+    syntax: [
+      '{{varType}} {{varName}}[{{size}}] = { {{value}} };',
+      '{{varType}} {{varName}}[{{size}}];'
+    ],
     toCode: ({ node, indentLevel }) => {
       const data = node.data as unknown as NodeData;
-      return `${getIndent(indentLevel)}${data.varType || 'int'} ${data.varName || 'arr'}[${data.size || '10'}] = {${data.value || ''}};\n`;
+      const indent = getIndent(indentLevel);
+      const varType = data.varType || 'int';
+      const varName = data.varName || 'arr';
+      const size = data.size || '10';
+
+      // Check if value exists and is not just whitespace
+      const hasValue = data.value !== undefined && data.value !== null && String(data.value).trim() !== '';
+
+      if (hasValue) {
+        return `${indent}${varType} ${varName}[${size}] = {${data.value}};\n`;
+      }
+
+      return `${indent}${varType} ${varName}[${size}];\n`;
     }
   },
   assignment: {

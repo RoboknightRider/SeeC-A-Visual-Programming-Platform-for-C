@@ -551,7 +551,7 @@ const CodePreview = React.memo(({
         <div className="relative flex-1 min-h-0 overflow-hidden p-4 font-mono text-sm">
           <pre
             aria-hidden="true"
-            className="absolute inset-4 overflow-hidden text-emerald-400/90 leading-relaxed pointer-events-none"
+            className="absolute inset-4 overflow-auto text-emerald-400/90 leading-relaxed pointer-events-none whitespace-pre"
           >
             {generatedCode.replace(/\r/g, '').split('\n').map((line, index) => {
               const lineNumber = index + 1;
@@ -570,6 +570,7 @@ const CodePreview = React.memo(({
             value={generatedCode}
             onChange={(event) => onCodeChange(event.target.value)}
             disabled={editingDisabled}
+            wrap="off"
             onScroll={(event) => {
               const highlightLayer = event.currentTarget.previousElementSibling as HTMLElement | null;
               if (highlightLayer) {
@@ -579,7 +580,7 @@ const CodePreview = React.memo(({
             }}
             spellCheck={false}
             aria-label="Editable generated C code"
-            className="relative w-full h-full min-h-[16rem] resize-none bg-transparent text-transparent caret-emerald-400 selection:bg-emerald-500/30 leading-relaxed outline-none overflow-auto"
+            className="relative w-full h-full min-h-[16rem] resize-none bg-transparent text-transparent caret-emerald-400 selection:bg-emerald-500/30 leading-relaxed outline-none overflow-auto whitespace-pre"
           />
         </div>
         <div className="p-4 bg-zinc-900/80 border-t border-zinc-800">

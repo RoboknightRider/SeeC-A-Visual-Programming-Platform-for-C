@@ -1,4 +1,4 @@
-import { Node, Edge } from "@xyflow/react";
+import { Node, Edge, Position } from "@xyflow/react";
 import { NODE_REGISTRY } from "../components/Nodes";
 
 /**
@@ -31,7 +31,150 @@ export function parseCodeToNodes(code: string): { nodes: Node[], edges: Edge[] }
   // 2. Parse everything through one syntax-driven recursive walker.
   parseBlock(cleanCode, null, 'next', state);
 
-  return { nodes: state.nodes, edges: state.edges };
+  const layouted = layoutParsedNodes(state.nodes, state.edges);
+  return {nodes: layouted.nodes, edges: layouted.edges };
+}
+
+function layoutParsedNodes(nodes: Node[], edges: Edge[]) {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const nextBySource = new Map<string, string>();
+  const bodyBySource = new Map<string, string>();
+  const incomingCount = new Map<string, number>(nodes.map((node) => [node.id, 0]));
+
+  edges.forEach((edge) => {
+    incomingCount.set(edge.target, (incomingCount.get(edge.target) || 0) + 1);
+
+    if (edge.sourceHandle === 'body') {
+      bodyBySource.set(edge.source, edge.target);
+      return;
+    }
+
+    if ((edge.sourceHandle === 'next' || !edge.sourceHandle) && !nextBySource.has(edge.source)) {
+      nextBySource.set(edge.source, edge.target);
+    }
+  });
+
+  const getRootSortWeight = (node: Node) => {
+    const registryItem = NODE_REGISTRY[(node.data as { type?: string })?.type || node.type as string];
+    if (registryItem?.hidePrevHandle) return 0;
+    if (registryItem?.category === 'Structure') return 1;
+    if (registryItem?.category === 'Control') return 2;
+    return 3;
+  };
+
+  const sortedNodes = [...nodes].sort((a, b) => {
+    const aPriority = getRootSortWeight(a);
+    const bPriority = getRootSortWeight(b);
+
+    if (aPriority !== bPriority) return aPriority - bPriority;
+    if ((a.position?.y ?? 0) !== (b.position?.y ?? 0)) return (a.position?.y ?? 0) - (b.position?.y ?? 0);
+    if ((a.position?.x ?? 0) !== (b.position?.x ?? 0)) return (a.position?.x ?? 0) - (b.position?.x ?? 0);
+    return a.id.localeCompare(b.id);
+  });
+
+  const rootIds = sortedNodes
+    .filter((node) => (incomingCount.get(node.id) || 0) === 0)
+    .map((node) => node.id);
+
+  const preferredRoots = sortedNodes
+    .filter((node) => NODE_REGISTRY[(node.data as { type?: string })?.type || node.type as string]?.hidePrevHandle)
+    .map((node) => node.id);
+
+  const orderedRoots = Array.from(new Set([...preferredRoots, ...rootIds]));
+
+  const placed = new Set<string>();
+  const blockTrees: Array<Array<{ id: string; indentLevel: number }>> = [];
+
+  const placeBlock = (nodeId: string, indentLevel: number, currentTree: Array<{ id: string; indentLevel: number }>) => {
+    if (placed.has(nodeId)) return;
+
+    const node = nodeById.get(nodeId);
+    if (!node) return;
+
+    currentTree.push({ id: nodeId, indentLevel });
+    placed.add(nodeId);
+
+    const registry = NODE_REGISTRY[(node.data as { type?: string })?.type || node.type as string];
+    const bodyTarget = bodyBySource.get(nodeId);
+
+    if (bodyTarget) {
+      const isContainer = registry?.category === 'Structure' || registry?.category === 'Control' || registry?.hidePrevHandle;
+      const bodyIndentDelta = isContainer ? 1 : 0;
+      placeBlock(bodyTarget, indentLevel + bodyIndentDelta, currentTree);
+    }
+
+    const nextTarget = nextBySource.get(nodeId);
+    if (nextTarget) {
+      placeBlock(nextTarget, indentLevel, currentTree);
+    }
+  };
+
+  orderedRoots.forEach((rootId) => {
+    if (placed.has(rootId)) return;
+    const tree: Array<{ id: string; indentLevel: number }> = [];
+    placeBlock(rootId, 0, tree);
+    if (tree.length > 0) {
+      blockTrees.push(tree);
+    }
+  });
+
+  sortedNodes.forEach((node) => {
+    if (placed.has(node.id)) return;
+    const tree: Array<{ id: string; indentLevel: number }> = [];
+    placeBlock(node.id, 0, tree);
+    if (tree.length > 0) {
+      blockTrees.push(tree);
+    }
+  });
+
+  const defaultNodeWidth = 220;
+  const defaultNodeHeight = 72;
+  const startX = 80;
+  const minLineGap = 28;
+  const sectionGap = 70;
+  const indentStep = 210;
+
+  const allPlacements = blockTrees.flat();
+  const maxIndent = allPlacements.reduce((max, p) => Math.max(max, p.indentLevel), 0);
+  const xByIndent = new Map<number, number>();
+  xByIndent.set(0, startX);
+  for (let i = 1; i <= maxIndent; i += 1) {
+    xByIndent.set(i, startX + i * indentStep);
+  }
+
+  const positions = new Map<string, { x: number; y: number }>();
+  let currentY = 50;
+
+  blockTrees.forEach((tree, treeIndex) => {
+    tree.forEach(({ id, indentLevel }) => {
+      const node = nodeById.get(id);
+      if (!node) return;
+
+      const nodeHeight = (node as any).measured?.height ?? (node.style as any)?.height ?? defaultNodeHeight;
+      const gridAlignedHeight = Math.max(1, Number(nodeHeight) || defaultNodeHeight);
+
+      positions.set(id, {
+        x: xByIndent.get(indentLevel) || startX,
+        y: currentY,
+      });
+
+      currentY += gridAlignedHeight + minLineGap;
+    });
+
+    if (treeIndex < blockTrees.length - 1) {
+      currentY += sectionGap;
+    }
+  });
+
+  return {
+    nodes: nodes.map((node) => ({
+      ...node,
+      targetPosition: Position.Top,
+      sourcePosition: Position.Bottom,
+      position: positions.get(node.id) || node.position || { x: 80, y: 50 },
+    })),
+    edges,
+  };
 }
 
 function parseBlock(block: string, parentId: string | null, parentHandle: string, state: ParserState): number {
