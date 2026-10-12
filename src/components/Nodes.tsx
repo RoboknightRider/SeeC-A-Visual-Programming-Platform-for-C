@@ -48,7 +48,7 @@ export interface NodeRegistryItem {
   icon: any;
   color?: string;
   label: string;
-  category: 'Structure' | 'Data' | 'Control' | 'I/O';
+  category: string;
   layout?: 'vertical' | 'horizontal';
   defaultData: Partial<NodeData>;
   fields?: NodeField[];
@@ -74,6 +74,8 @@ export const BaseNode = React.memo((props: any) => {
 });
 
 // --- Node Registry ---
+
+export const NODE_CATEGORY_ORDER = ['Structure', 'Data', 'Control', 'I/O', 'Memory'] as const;
 
 export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
   include: {
@@ -433,6 +435,86 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       const data = node.data as unknown as NodeData;
       const params = getFieldValue('params');
       return `${data.varName || 'func'}(${params || ''})`;
+    }
+  },
+  malloc: {
+    type: 'malloc',
+    icon: icons.variable,
+    color: 'emerald',
+    label: 'Malloc',
+    category: 'Memory',
+    layout: 'horizontal',
+    defaultData: { varName: 'items', varType: 'int', size: '10' },
+    fields: [
+      { key: 'varName', label: 'Pointer', type: 'text', placeholder: 'items' },
+      { key: 'varType', label: 'Element Type', type: 'type-selector' },
+      { key: 'size', label: 'Count', type: 'text', placeholder: '10', connectable: true }
+    ],
+    syntax: '{{varType}} *{{varName}} = malloc(({{size}}) * sizeof({{varType}}));',
+    toCode: ({ node, indentLevel, getFieldValue }) => {
+      const data = node.data as unknown as NodeData;
+      const varName = data.varName || 'items';
+      const varType = data.varType || 'int';
+      const size = getFieldValue('size') || '10';
+      return `${getIndent(indentLevel)}${varType} *${varName} = malloc((${size}) * sizeof(${varType}));\n`;
+    },
+    toExpression: ({ node, getFieldValue }) => {
+      const data = node.data as unknown as NodeData;
+      const varType = data.varType || 'int';
+      const size = getFieldValue('size') || '10';
+      return `malloc((${size}) * sizeof(${varType}))`;
+    }
+  },
+  realloc: {
+    type: 'realloc',
+    icon: icons.array,
+    color: 'emerald',
+    label: 'Realloc',
+    category: 'Memory',
+    layout: 'horizontal',
+    defaultData: { varName: 'items', varType: 'int', size: '20' },
+    fields: [
+      { key: 'varName', label: 'Pointer', type: 'text', placeholder: 'items' },
+      { key: 'varType', label: 'Element Type', type: 'type-selector' },
+      { key: 'size', label: 'New Count', type: 'text', placeholder: '20', connectable: true }
+    ],
+    syntax: '{{varName}} = realloc({{varName}}, ({{size}}) * sizeof({{varType}}));',
+    toCode: ({ node, indentLevel, getFieldValue }) => {
+      const data = node.data as unknown as NodeData;
+      const varName = data.varName || 'items';
+      const varType = data.varType || 'int';
+      const size = getFieldValue('size') || '20';
+      return `${getIndent(indentLevel)}${varName} = realloc(${varName}, (${size}) * sizeof(${varType}));\n`;
+    },
+    toExpression: ({ node, getFieldValue }) => {
+      const data = node.data as unknown as NodeData;
+      const varName = data.varName || 'items';
+      const varType = data.varType || 'int';
+      const size = getFieldValue('size') || '20';
+      return `realloc(${varName}, (${size}) * sizeof(${varType}))`;
+    }
+  },
+  free: {
+    type: 'free',
+    icon: icons.return,
+    color: 'rose',
+    label: 'Free',
+    category: 'Memory',
+    layout: 'horizontal',
+    defaultData: { varName: 'items' },
+    fields: [
+      { key: 'varName', label: 'Pointer', type: 'text', placeholder: 'items', connectable: true }
+    ],
+    syntax: 'free({{varName}});',
+    toCode: ({ node, indentLevel, getFieldValue }) => {
+      const data = node.data as unknown as NodeData;
+      const varName = getFieldValue('varName') || data.varName || 'items';
+      return `${getIndent(indentLevel)}free(${varName});\n`;
+    },
+    toExpression: ({ node, getFieldValue }) => {
+      const data = node.data as unknown as NodeData;
+      const varName = getFieldValue('varName') || data.varName || 'items';
+      return `free(${varName})`;
     }
   },
   return: {

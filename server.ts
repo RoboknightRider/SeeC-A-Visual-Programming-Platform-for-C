@@ -22,6 +22,7 @@ interface ServerConfig {
   appPort: number;
   wsPath: string;
   localAiPort: number;
+  localAiContextSize: number;
 }
 
 function getPortFromEnv(name: string, fallback: number): number {
@@ -38,6 +39,7 @@ function loadServerConfig(): ServerConfig {
     appPort: getPortFromEnv("PORT", 3000),
     wsPath: process.env.WS_PATH?.trim() || "/ws",
     localAiPort: getPortFromEnv("LOCAL_AI_PORT", 8080),
+    localAiContextSize: Math.max(1024, getPortFromEnv("LOCAL_AI_CONTEXT_SIZE", 4096)),
   };
 }
 
@@ -105,7 +107,7 @@ function createGeminiClient(): GoogleGenAI | null {
 // ===== Local AI (llama-server) Process Reference =====
 let llamaServerProcess: ChildProcess | null = null;
 
-function startLlamaServer(localAiPort: number) {
+function startLlamaServer(localAiPort: number, contextSize: number) {
   const llamaExecutable = path.join(process.cwd(), "bin", "llama-server.exe");
   const modelPath = path.join(process.cwd(), "models", "seec-tutor.gguf");
 
@@ -123,7 +125,7 @@ function startLlamaServer(localAiPort: number) {
   llamaServerProcess = spawn(llamaExecutable, [
     "-m", modelPath,
     "--port", String(localAiPort),
-    "-c", "2048",
+    "-c", String(contextSize),
     "--threads", "4"
   ]);
 
@@ -478,7 +480,8 @@ function registerAIRoutes(app: express.Express, config: ServerConfig, geminiClie
         payload.messages,
         getLocalAICompletionsEndpoint(config),
         payload.systemInstruction,
-        payload.contextSummary
+        payload.contextSummary,
+        config.localAiContextSize
       );
       res.json({ text });
     } catch (error) {
@@ -1068,7 +1071,7 @@ function handleDebugStepOut(session: ClientSession) {
 
 function initializeLocalAi(localAiPort: number) {
   // Encapsulate local AI startup so startup sequence is clearer
-  startLlamaServer(localAiPort);
+  startLlamaServer(localAiPort, serverConfig.localAiContextSize);
 }
 
 function createAppAndClient() {

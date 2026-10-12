@@ -57,6 +57,70 @@ export function compactChatHistory(messages: ChatMessage[] = [], maxMessages = 1
   return messages.slice(messages.length - maxMessages);
 }
 
+const LOCAL_AI_RESPONSE_TOKENS = 512;
+
+function estimateMessageTokens(message: { content: string }): number {
+  return Math.ceil(message.content.length / 3) + 4;
+}
+
+function truncateToTokenBudget(text: string, tokenBudget: number): string {
+  const maxCharacters = Math.max(0, tokenBudget * 3);
+  return text.length <= maxCharacters ? text : text.slice(0, maxCharacters);
+}
+
+function buildLocalMessages(
+  prompt: string,
+  messages: ChatMessage[],
+  systemInstruction: string | undefined,
+  contextSummary: string | undefined,
+  contextSize: number
+): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+  const budget = Math.max(128, contextSize - LOCAL_AI_RESPONSE_TOKENS);
+  const systemMessages: Array<{ role: 'system'; content: string }> = [];
+  if (systemInstruction?.trim()) {
+    systemMessages.push({ role: 'system', content: systemInstruction.trim() });
+  }
+
+  const currentPrompt = { role: 'user' as const, content: prompt };
+  let usedTokens = systemMessages.reduce((total, message) => total + estimateMessageTokens(message), 0);
+  const promptBudget = Math.max(1, budget - usedTokens - 4);
+  currentPrompt.content = truncateToTokenBudget(prompt, promptBudget);
+  usedTokens += estimateMessageTokens(currentPrompt);
+
+  const history = compactChatHistory(messages, 12).filter((message) =>
+    message?.sender && typeof message.text === 'string'
+  );
+  const lastMessage = history[history.length - 1];
+  if (lastMessage?.sender === 'user' && lastMessage.text === prompt) {
+    history.pop();
+  }
+
+  const selectedHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  for (const message of history.reverse()) {
+    const formatted = {
+      role: message.sender === 'user' ? 'user' as const : 'assistant' as const,
+      content: message.text || '',
+    };
+    const messageTokens = estimateMessageTokens(formatted);
+    if (usedTokens + messageTokens > budget) {
+      break;
+    }
+    selectedHistory.unshift(formatted);
+    usedTokens += messageTokens;
+  }
+
+  const summary = contextSummary?.trim();
+  if (summary && usedTokens < budget - 4) {
+    const summaryBudget = Math.min(512, budget - usedTokens - 4);
+    const summaryContent = truncateToTokenBudget(`Conversation summary:\n${summary}`, summaryBudget);
+    if (summaryContent) {
+      systemMessages.push({ role: 'system', content: summaryContent });
+    }
+  }
+
+  return [...systemMessages, ...selectedHistory, currentPrompt];
+}
+
 function buildFallbackNotice(reason: string): string {
   return `Gemini is temporarily unavailable (${reason}), so I switched to Local AI for this reply.`;
 }
@@ -130,26 +194,17 @@ export async function generateLocalServerResponse(
   messages: ChatMessage[] = [],
   endpoint: string,
   systemInstruction?: string,
-  contextSummary?: string
+  contextSummary?: string,
+  contextSize = 4096
 ): Promise<string> {
-  const safeMessages = compactChatHistory(messages, 12);
-  const formattedMessages = [
-    ...(systemInstruction?.trim() ? [{ role: 'system' as const, content: systemInstruction }] : []),    ...(contextSummary?.trim()
-      ? [{ role: 'system' as const, content: `Conversation summary:\n${contextSummary.trim()}` }]
-      : []),    ...(safeMessages || [])
-      .filter((message) => message?.sender && typeof message.text === 'string')
-      .map((message) => ({
-        role: message.sender === 'user' ? 'user' : 'assistant',
-        content: message.text || '',
-      })) as Array<{ role: 'user' | 'assistant'; content: string }>,
-    { role: 'user' as const, content: prompt },
-  ];
+  const formattedMessages = buildLocalMessages(prompt, messages, systemInstruction, contextSummary, contextSize);
 
   const localResponse = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       messages: formattedMessages,
+      max_tokens: LOCAL_AI_RESPONSE_TOKENS,
     }),
   });
 

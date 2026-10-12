@@ -4,14 +4,13 @@ import ReactMarkdown from 'react-markdown';
 import { cn } from '../lib/utils'; 
 import { askAI, type AIProvider as GeminiAIProvider } from '../services/codingAgent';
 
-type AIProvider = GeminiAIProvider | 'gemini' | 'local';
+type AIProvider = GeminiAIProvider;
 
-// 1. Updated Message interface to store provider in message state
 interface Message {
   id: string;
   sender: 'user' | 'ai';
   text: string;
-  provider?: AIProvider; // <-- Stores who answered this specific message
+  provider?: AIProvider;
 }
 
 interface MessageSegment {
@@ -38,23 +37,132 @@ interface AIStatusResponse {
   };
 }
 
-const AI_PROVIDER_SESSION_KEY = 'seec-ai-provider';
-const CHAT_MESSAGES_STORAGE_KEY = 'seec-chat-messages';
-const CHAT_SUMMARY_STORAGE_KEY = 'seec-chat-summary';
-const DEFAULT_CHATBOX_WIDTH = 416;
-const DEFAULT_CHATBOX_HEIGHT = 448;
-const MIN_CHATBOX_WIDTH = 340;
-const MIN_CHATBOX_HEIGHT = 320;
+const CHAT_CONFIG = {
+  fullscreenInset: 12,
+  defaultWidth: 416,
+  defaultHeight: 448,
+  minWidth: 340,
+  minHeight: 320,
+  resizeViewportPadding: 24,
+  recentMessageCount: 6,
+  summaryMessageThreshold: 10,
+  copyFeedbackDurationMs: 1200,
+  scrollBehavior: 'smooth' as ScrollBehavior,
+};
+
+const CHAT_STORAGE_KEYS = {
+  provider: 'seec-ai-provider',
+  messages: 'seec-chat-messages',
+  summary: 'seec-chat-summary',
+};
+
+const AI_PROVIDER_LABELS: Record<AIProvider, string> = {
+  gemini: 'Online AI',
+  local: 'Offline AI',
+};
+
+const CHAT_TEXT = {
+  title: 'SeeC AI',
+  greeting: 'Hello! I am your SeeC AI Assistant. How can I help you today?',
+  thinking: 'Thinking...',
+  onlineProvider: AI_PROVIDER_LABELS.gemini,
+  offlineProvider: AI_PROVIDER_LABELS.local,
+  inputPlaceholder: (provider: AIProvider) => `Ask ${AI_PROVIDER_LABELS[provider]}...`,
+  copied: 'Copied',
+  copy: 'Copy',
+  code: 'code',
+  clearHistory: 'Clear chat history',
+  fullscreen: 'Full screen',
+  exitFullscreen: 'Exit full screen',
+  closeChat: 'Close chat',
+  resizeChat: 'Resize chat window',
+};
+
+const MESSAGE_MARKDOWN_CLASSES = cn(
+  'prose prose-invert max-w-none text-xs space-y-1.5',
+  '[&_strong]:font-bold [&_strong]:text-white',
+  '[&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4',
+  '[&_code]:bg-zinc-950 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-[11px]',
+  '[&_pre]:bg-zinc-950 [&_pre]:p-2 [&_pre]:rounded-md [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0'
+);
+
 const INITIAL_CHAT_MESSAGES: Message[] = [
-  { id: '1', sender: 'ai', text: 'Hello! I am your SeeC AI Assistant. How can I help you today?', provider: 'gemini' },
+  { id: '1', sender: 'ai', text: CHAT_TEXT.greeting, provider: 'gemini' },
 ];
+
+function getRecentMessages(allMessages: Message[]): Message[] {
+  return allMessages.slice(-CHAT_CONFIG.recentMessageCount);
+}
+
+function getMessagesToSummarize(allMessages: Message[]): Message[] {
+  const olderMessageCount = allMessages.length - CHAT_CONFIG.recentMessageCount;
+  return olderMessageCount > 0 ? allMessages.slice(0, olderMessageCount) : [];
+}
+
+function buildSummaryPrompt(messagesToSummarize: Message[], existingSummary: string): string {
+  const conversationText = messagesToSummarize
+    .map((message) => `${message.sender === 'user' ? 'User' : 'Assistant'}: ${message.text}`)
+    .join('\n');
+
+  if (!conversationText) {
+    return '';
+  }
+
+  if (existingSummary.trim()) {
+    return `You already have this summary of the prior conversation:\n${existingSummary.trim()}\n\nUpdate and improve it using the following older chat history. Keep the summary short, focused on the user's goal, what was tried, what failed, and the current situation:\n\n${conversationText}`;
+  }
+
+  return `Summarize the following older conversation for future replies. Keep it short, focused on the user's goal, what was tried, what failed, and the current situation:\n\n${conversationText}`;
+}
+
+function parseMessageSegments(text: string): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  const codeBlockPattern = /```([\w-]*)\s*([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = codeBlockPattern.exec(text)) !== null) {
+    const plainText = text.slice(lastIndex, match.index).trim();
+    if (plainText) {
+      segments.push({ type: 'text', content: plainText });
+    }
+
+    segments.push({
+      type: 'code',
+      content: match[2]?.trim() || '',
+      language: match[1]?.trim() || undefined,
+    });
+    lastIndex = codeBlockPattern.lastIndex;
+  }
+
+  const trailingText = text.slice(lastIndex).trim();
+  if (trailingText) {
+    segments.push({ type: 'text', content: trailingText });
+  }
+
+  return segments;
+}
+
+function buildExecutionErrorPrompt(errorText: string, code?: string): string {
+  let prompt = `I encountered a compilation/execution error in my C code. Can you analyze this terminal log and guide me on how to fix my flow diagrams?\n\n\`\`\`text\n${errorText}\n\`\`\``;
+  if (code?.trim()) {
+    prompt += `\n\nHere's the generated C code:\n\`\`\`c\n${code}\n\`\`\``;
+  }
+  return prompt;
+}
+
+const MessageMarkdown = ({ content }: { content: string }) => (
+  <div className={MESSAGE_MARKDOWN_CLASSES}>
+    <ReactMarkdown>{content}</ReactMarkdown>
+  </div>
+);
 
 const getInitialProvider = (): AIProvider => {
   if (typeof window === 'undefined') {
     return 'gemini';
   }
 
-  const saved = window.sessionStorage.getItem(AI_PROVIDER_SESSION_KEY);
+  const saved = window.sessionStorage.getItem(CHAT_STORAGE_KEYS.provider);
   return saved === 'local' ? 'local' : 'gemini';
 };
 
@@ -64,7 +172,7 @@ const getSavedMessages = (): Message[] => {
   }
 
   try {
-    const raw = window.localStorage.getItem(CHAT_MESSAGES_STORAGE_KEY);
+    const raw = window.localStorage.getItem(CHAT_STORAGE_KEYS.messages);
     if (!raw) {
       return INITIAL_CHAT_MESSAGES;
     }
@@ -85,7 +193,7 @@ const getSavedSummary = (): string => {
     return '';
   }
 
-  return window.localStorage.getItem(CHAT_SUMMARY_STORAGE_KEY) || '';
+  return window.localStorage.getItem(CHAT_STORAGE_KEYS.summary) || '';
 };
 
 export const Chatbox: React.FC<ChatboxProps> = ({
@@ -101,38 +209,10 @@ export const Chatbox: React.FC<ChatboxProps> = ({
   const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
   const [geminiAvailable, setGeminiAvailable] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [chatboxSize, setChatboxSize] = useState({ width: DEFAULT_CHATBOX_WIDTH, height: DEFAULT_CHATBOX_HEIGHT });
+  const [chatboxSize, setChatboxSize] = useState({ width: CHAT_CONFIG.defaultWidth, height: CHAT_CONFIG.defaultHeight });
   const [contextSummary, setContextSummary] = useState(getSavedSummary());
 
   const [aiProvider, setAiProvider] = useState<AIProvider>(getInitialProvider);
-
-  const RECENT_MESSAGE_COUNT = 6;
-  const SUMMARY_MESSAGE_THRESHOLD = 10;
-
-  const getRecentMessages = useCallback((allMessages: Message[]) => {
-    return allMessages.slice(-RECENT_MESSAGE_COUNT);
-  }, []);
-
-  const getMessagesToSummarize = useCallback((allMessages: Message[]) => {
-    const olderMessageCount = allMessages.length - RECENT_MESSAGE_COUNT;
-    return olderMessageCount > 0 ? allMessages.slice(0, olderMessageCount) : [];
-  }, []);
-
-  const buildSummaryPrompt = useCallback((messagesToSummarize: Message[], existingSummary: string) => {
-    const conversationText = messagesToSummarize
-      .map((message) => `${message.sender === 'user' ? 'User' : 'Assistant'}: ${message.text}`)
-      .join('\n');
-
-    if (!conversationText) {
-      return '';
-    }
-
-    if (existingSummary?.trim()) {
-      return `You already have this summary of the prior conversation:\n${existingSummary.trim()}\n\nUpdate and improve it using the following older chat history. Keep the summary short, focused on the user's goal, what was tried, what failed, and the current situation:\n\n${conversationText}`;
-    }
-
-    return `Summarize the following older conversation for future replies. Keep it short, focused on the user's goal, what was tried, what failed, and the current situation:\n\n${conversationText}`;
-  }, []);
 
   const updateContextSummary = useCallback(async (allMessages: Message[]) => {
     const messagesToSummarize = getMessagesToSummarize(allMessages);
@@ -149,13 +229,13 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     if (res.text && typeof res.text === 'string') {
       setContextSummary(res.text.trim());
     }
-  }, [aiProvider, contextSummary, buildSummaryPrompt, getMessagesToSummarize]);
+  }, [aiProvider, contextSummary]);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const resizeStateRef = useRef<{ startX: number; startY: number; startWidth: number; startHeight: number } | null>(null);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    chatEndRef.current?.scrollIntoView({ behavior: CHAT_CONFIG.scrollBehavior });
   }, [messages, isLoading]);
 
   useEffect(() => {
@@ -195,7 +275,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
       return;
     }
 
-    window.sessionStorage.setItem(AI_PROVIDER_SESSION_KEY, aiProvider);
+    window.sessionStorage.setItem(CHAT_STORAGE_KEYS.provider, aiProvider);
   }, [aiProvider]);
 
   useEffect(() => {
@@ -203,8 +283,8 @@ export const Chatbox: React.FC<ChatboxProps> = ({
       return;
     }
 
-    window.localStorage.setItem(CHAT_MESSAGES_STORAGE_KEY, JSON.stringify(messages));
-    window.localStorage.setItem(CHAT_SUMMARY_STORAGE_KEY, contextSummary);
+    window.localStorage.setItem(CHAT_STORAGE_KEYS.messages, JSON.stringify(messages));
+    window.localStorage.setItem(CHAT_STORAGE_KEYS.summary, contextSummary);
   }, [messages, contextSummary]);
 
   useEffect(() => {
@@ -226,10 +306,10 @@ export const Chatbox: React.FC<ChatboxProps> = ({
         return;
       }
 
-      const maxWidth = Math.max(MIN_CHATBOX_WIDTH, window.innerWidth - 24);
-      const maxHeight = Math.max(MIN_CHATBOX_HEIGHT, window.innerHeight - 24);
-      const nextWidth = Math.min(maxWidth, Math.max(MIN_CHATBOX_WIDTH, resizeState.startWidth + (resizeState.startX - event.clientX)));
-      const nextHeight = Math.min(maxHeight, Math.max(MIN_CHATBOX_HEIGHT, resizeState.startHeight + (resizeState.startY - event.clientY)));
+      const maxWidth = Math.max(CHAT_CONFIG.minWidth, window.innerWidth - CHAT_CONFIG.resizeViewportPadding);
+      const maxHeight = Math.max(CHAT_CONFIG.minHeight, window.innerHeight - CHAT_CONFIG.resizeViewportPadding);
+      const nextWidth = Math.min(maxWidth, Math.max(CHAT_CONFIG.minWidth, resizeState.startWidth + (resizeState.startX - event.clientX)));
+      const nextHeight = Math.min(maxHeight, Math.max(CHAT_CONFIG.minHeight, resizeState.startHeight + (resizeState.startY - event.clientY)));
 
       setChatboxSize({ width: nextWidth, height: nextHeight });
     };
@@ -247,43 +327,13 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     };
   }, []);
 
-  const parseMessageSegments = useCallback((text: string): MessageSegment[] => {
-    const segments: MessageSegment[] = [];
-    const regex = /```([\w-]*)\s*([\s\S]*?)```/g;
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-
-    while ((match = regex.exec(text)) !== null) {
-      if (match.index > lastIndex) {
-        const plainText = text.slice(lastIndex, match.index).trim();
-        if (plainText) {
-          segments.push({ type: 'text', content: plainText });
-        }
-      }
-
-      const language = match[1]?.trim();
-      const codeContent = match[2]?.trim() || '';
-      segments.push({ type: 'code', content: codeContent, language: language || undefined });
-      lastIndex = regex.lastIndex;
-    }
-
-    if (lastIndex < text.length) {
-      const tail = text.slice(lastIndex).trim();
-      if (tail) {
-        segments.push({ type: 'text', content: tail });
-      }
-    }
-
-    return segments;
-  }, []);
-
   const handleCopyCode = useCallback(async (codeKey: string, text: string) => {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedCodeKey(codeKey);
       window.setTimeout(() => {
         setCopiedCodeKey((current) => (current === codeKey ? null : current));
-      }, 1200);
+      }, CHAT_CONFIG.copyFeedbackDurationMs);
     } catch (error) {
       console.error('Failed to copy code:', error);
     }
@@ -297,8 +347,8 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     setContextSummary('');
 
     if (typeof window !== 'undefined') {
-      window.localStorage.removeItem(CHAT_MESSAGES_STORAGE_KEY);
-      window.localStorage.removeItem(CHAT_SUMMARY_STORAGE_KEY);
+      window.localStorage.removeItem(CHAT_STORAGE_KEYS.messages);
+      window.localStorage.removeItem(CHAT_STORAGE_KEYS.summary);
     }
 
     if (clearInitialError) {
@@ -321,111 +371,74 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     };
   }, [chatboxSize.height, chatboxSize.width, isFullscreen]);
 
-  // 2. Updated handleSendMessage to save provider into state
-  const handleSendMessage = useCallback(async () => {
-    const trimmedInput = chatInput.trim();
-    if (!trimmedInput || isLoading) return;
-
-    const userText = trimmedInput;
+  const sendMessage = useCallback(async (userText: string, clearInput = false) => {
     const currentProvider = aiProvider;
-
     const userMessage: Message = {
       id: Date.now().toString(),
       sender: 'user',
       text: userText
     };
-
     const nextMessages = [...messages, userMessage];
     setMessages(nextMessages);
-    setChatInput('');
+    if (clearInput) {
+      setChatInput('');
+    }
     setIsLoading(true);
 
-    const recentMessages = getRecentMessages(nextMessages);
-    const res = await askAI(userText, recentMessages, currentProvider, contextSummary);
-    const actualProvider = res.usedProvider || currentProvider;
+    try {
+      const response = await askAI(userText, getRecentMessages(nextMessages), currentProvider, contextSummary);
+      const actualProvider = response.usedProvider || currentProvider;
+      const aiReply: Message = {
+        id: (Date.now() + 1).toString(),
+        sender: 'ai',
+        text: response.text,
+        provider: actualProvider,
+      };
+      const updatedMessages = [...nextMessages, aiReply];
 
-    const aiReply: Message = {
-      id: (Date.now() + 1).toString(),
-      sender: 'ai',
-      text: res.text,
-      provider: actualProvider
-    };
+      if (currentProvider === 'gemini' && actualProvider === 'local') {
+        setAiProvider('local');
+      }
 
-    if (currentProvider === 'gemini' && actualProvider === 'local') {
-      setAiProvider('local');
+      setMessages(updatedMessages);
+      if (updatedMessages.length > CHAT_CONFIG.summaryMessageThreshold) {
+        void updateContextSummary(updatedMessages);
+      }
+    } finally {
+      setIsLoading(false);
     }
+  }, [aiProvider, contextSummary, messages, updateContextSummary]);
 
-    const updatedMessages = [...nextMessages, aiReply];
-    setMessages(updatedMessages);
-    if (updatedMessages.length > SUMMARY_MESSAGE_THRESHOLD) {
-      void updateContextSummary(updatedMessages);
+  const handleSendMessage = useCallback(() => {
+    const trimmedInput = chatInput.trim();
+    if (!trimmedInput || isLoading) {
+      return;
     }
-    setIsLoading(false);
-  }, [chatInput, isLoading, messages, aiProvider]);
-
-  // 3. Updated handleAutoSendError to save provider into state
-  const handleAutoSendError = useCallback(async (errorText: string) => {
-    setIsLoading(true);
-    const currentProvider = aiProvider;
-
-    let promptText = `I encountered a compilation/execution error in my C code. Can you analyze this terminal log and guide me on how to fix my flow diagrams?\n\n\`\`\`text\n${errorText}\n\`\`\``;
-    if (initialCode && initialCode.trim()) {
-      promptText += `\n\nHere's the generated C code:\n\`\`\`c\n${initialCode}\n\`\`\``;
-    }
-
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      sender: 'user',
-      text: promptText
-    };
-
-    const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
-
-    const recentMessages = getRecentMessages(nextMessages);
-    const res = await askAI(userMessage.text, recentMessages, currentProvider, contextSummary);
-    const actualProvider = res.usedProvider || currentProvider;
-
-    const aiReply: Message = {
-      id: (Date.now() + 1).toString(),
-      sender: 'ai',
-      text: res.text,
-      provider: actualProvider
-    };
-
-    if (currentProvider === 'gemini' && actualProvider === 'local') {
-      setAiProvider('local');
-    }
-
-    const updatedMessages = [...nextMessages, aiReply];
-    setMessages(updatedMessages);
-    if (updatedMessages.length > SUMMARY_MESSAGE_THRESHOLD) {
-      void updateContextSummary(updatedMessages);
-    }
-    setIsLoading(false);
-  }, [messages, aiProvider, initialCode, contextSummary, getRecentMessages, updateContextSummary]);
+    void sendMessage(trimmedInput, true);
+  }, [chatInput, isLoading, sendMessage]);
 
   useEffect(() => {
-    if (initialError && initialError.trim() !== "" && showChat && !isLoading) {
-      handleAutoSendError(initialError);
-
-      if (clearInitialError) {
-        clearInitialError();
-      }
+    if (initialError?.trim() && showChat && !isLoading) {
+      void sendMessage(buildExecutionErrorPrompt(initialError, initialCode));
+      clearInitialError?.();
     }
-  }, [initialError, initialCode, showChat, isLoading, handleAutoSendError, clearInitialError]);
+  }, [initialError, initialCode, showChat, isLoading, sendMessage, clearInitialError]);
 
   if (!showChat) return null;
 
-  const chatboxStyle = isFullscreen
+  const chatboxStyle: React.CSSProperties = isFullscreen
     ? {
-        inset: '12px',
+        inset: `${CHAT_CONFIG.fullscreenInset}px`,
         width: 'auto',
         height: 'auto',
       }
     : {
         width: `${chatboxSize.width}px`,
         height: `${chatboxSize.height}px`,
+        minWidth: `${CHAT_CONFIG.minWidth}px`,
+        minHeight: `${CHAT_CONFIG.minHeight}px`,
+        maxWidth: `calc(100vw - ${CHAT_CONFIG.resizeViewportPadding}px)`,
+        maxHeight: `calc(100dvh - ${CHAT_CONFIG.resizeViewportPadding}px)`,
       };
 
   return (
@@ -434,7 +447,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
         "fixed bg-zinc-900 border border-zinc-800 shadow-2xl z-[999] flex flex-col overflow-hidden",
         isFullscreen
           ? "rounded-xl"
-          : "right-3 bottom-3 min-w-[340px] min-h-[320px] max-w-[calc(100vw-1.5rem)] max-h-[calc(100dvh-1.5rem)] rounded-xl"
+          : "right-3 bottom-3 rounded-xl"
       )}
       style={chatboxStyle}
     >
@@ -443,7 +456,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
       <div className="p-3 border-b border-zinc-800 bg-zinc-900 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 shrink-0">
           <MessageSquare className="text-blue-500 w-4 h-4" />
-          <h3 className="text-xs font-bold text-white hidden sm:block">SeeC AI</h3>
+          <h3 className="text-xs font-bold text-white hidden sm:block">{CHAT_TEXT.title}</h3>
         </div>
 
         {/* Radio Switcher */}
@@ -466,7 +479,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
               className="sr-only"
             />
             <Globe className="w-3 h-3 text-emerald-400 shrink-0" />
-            <span>{geminiAvailable ? 'Online AI' : 'Online AI (Unavailable)'}</span>
+            <span>{geminiAvailable ? CHAT_TEXT.onlineProvider : `${CHAT_TEXT.onlineProvider} (Unavailable)`}</span>
           </label>
 
           <label
@@ -486,7 +499,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
               className="sr-only"
             />
             <Cpu className="w-3 h-3 text-amber-400 shrink-0" />
-            <span>Offline AI</span>
+            <span>{CHAT_TEXT.offlineProvider}</span>
           </label>
         </div>
 
@@ -495,7 +508,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
             type="button"
             onClick={handleClearChat}
             className="p-1.5 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors border border-zinc-800 bg-zinc-950"
-            title="Clear chat history"
+            title={CHAT_TEXT.clearHistory}
           >
             <Trash2 size={14} />
           </button>
@@ -503,7 +516,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
             type="button"
             onClick={() => setIsFullscreen((current) => !current)}
             className="p-1.5 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors border border-zinc-800 bg-zinc-950"
-            title={isFullscreen ? 'Exit full screen' : 'Full screen'}
+            title={isFullscreen ? CHAT_TEXT.exitFullscreen : CHAT_TEXT.fullscreen}
           >
             {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
@@ -511,7 +524,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
             type="button"
             onClick={() => setShowChat(false)} 
             className="p-1.5 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-colors border border-zinc-800 bg-zinc-950"
-            title="Close chat"
+            title={CHAT_TEXT.closeChat}
           >
             <X size={14} />
           </button>
@@ -565,7 +578,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
                         <div key={codeKey} className="overflow-hidden rounded-md border border-zinc-700 bg-zinc-950">
                           <div className="flex items-center justify-between border-b border-zinc-800 px-2 py-1">
                             <span className="text-[10px] uppercase tracking-wide text-zinc-500">
-                              {segment.language || 'code'}
+                              {segment.language || CHAT_TEXT.code}
                             </span>
                             <button
                               type="button"
@@ -573,7 +586,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
                               className="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300 hover:text-white"
                             >
                               {copiedCodeKey === codeKey ? <Check size={12} /> : <Copy size={12} />}
-                              {copiedCodeKey === codeKey ? 'Copied' : 'Copy'}
+                              {copiedCodeKey === codeKey ? CHAT_TEXT.copied : CHAT_TEXT.copy}
                             </button>
                           </div>
                           <pre className="overflow-x-auto p-2">
@@ -585,38 +598,11 @@ export const Chatbox: React.FC<ChatboxProps> = ({
                       );
                     }
 
-                    return (
-                      <div
-                        key={`${msg.id}-text-${index}`}
-                        className={cn(
-                          "prose prose-invert max-w-none text-xs space-y-1.5",
-                          "[&_strong]:font-bold [&_strong]:text-white",
-                          "[&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4",
-                          "[&_code]:bg-zinc-950 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-[11px]",
-                          "[&_pre]:bg-zinc-950 [&_pre]:p-2 [&_pre]:rounded-md [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0"
-                        )}
-                      >
-                        <ReactMarkdown>
-                          {segment.content}
-                        </ReactMarkdown>
-                      </div>
-                    );
+                    return <MessageMarkdown key={`${msg.id}-text-${index}`} content={segment.content} />;
                   })}
                 </div>
               ) : (
-                <div
-                  className={cn(
-                    "prose prose-invert max-w-none text-xs space-y-1.5",
-                    "[&_strong]:font-bold [&_strong]:text-white",
-                    "[&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4",
-                    "[&_code]:bg-zinc-950 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-[11px]",
-                    "[&_pre]:bg-zinc-950 [&_pre]:p-2 [&_pre]:rounded-md [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0"
-                  )}
-                >
-                  <ReactMarkdown>
-                    {msg.text}
-                  </ReactMarkdown>
-                </div>
+                <MessageMarkdown content={msg.text} />
               )}
             </div>
           );
@@ -625,7 +611,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
         {isLoading && (
           <div className="bg-zinc-800/40 border border-zinc-700/20 p-3 rounded-lg text-zinc-500 self-start flex items-center gap-2">
             <Loader2 size={12} className="animate-spin text-blue-500" />
-            Thinking...
+            {CHAT_TEXT.thinking}
           </div>
         )}
         <div ref={chatEndRef} />
@@ -641,7 +627,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
             if (e.key === 'Enter') handleSendMessage();
           }}
           disabled={isLoading}
-          placeholder={isLoading ? "Thinking..." : `Ask ${aiProvider === 'local' ? 'Offline AI' : 'Online AI'}...`} 
+          placeholder={isLoading ? CHAT_TEXT.thinking : CHAT_TEXT.inputPlaceholder(aiProvider)}
           className="flex-1 bg-black/40 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
         />
         <button
@@ -662,7 +648,7 @@ export const Chatbox: React.FC<ChatboxProps> = ({
           <div
             className="absolute left-0 top-0 h-4 w-4 cursor-nwse-resize pointer-events-auto"
             onPointerDown={handleResizeStart}
-            title="Resize chat window"
+            title={CHAT_TEXT.resizeChat}
           />
         </div>
       )}
