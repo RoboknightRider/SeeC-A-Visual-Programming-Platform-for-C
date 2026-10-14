@@ -3,7 +3,7 @@ import { Bug, Code, Copy, Cpu, Download, MessageSquare, Play, Settings, SkipForw
 import { cn } from '../lib/utils';
 
 const toolbarButtonClass = 'flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap';
-const toolbarActionClass = 'flex items-center gap-2 px-4 py-1.5 rounded-lg font-bold text-xs transition-all shadow-lg whitespace-nowrap';
+const toolbarActionClass = 'flex items-center gap-2 px-4 py-1.5 rounded-lg font-bold text-xs transition-all whitespace-nowrap';
 
 export const TopBar = React.memo(({
   downloadAsCFile,
@@ -21,7 +21,8 @@ export const TopBar = React.memo(({
   saveProject,
   loadProject,
   showChat,
-  setShowChat
+  setShowChat,
+  onOpenSettings
 }: {
   downloadAsCFile: () => void;
   handleRun: () => void;
@@ -39,6 +40,7 @@ export const TopBar = React.memo(({
   loadProject: () => void;
   showChat: boolean;
   setShowChat: (show: boolean) => void;
+  onOpenSettings: () => void;
 }) => (
   <header className="h-14 border-b border-zinc-800 bg-zinc-900/80 backdrop-blur-md px-4 sm:px-6 shrink-0 z-50 overflow-x-auto overflow-y-hidden">
     <div className="flex min-w-max items-center justify-between gap-3 h-full">
@@ -72,7 +74,7 @@ export const TopBar = React.memo(({
           className={cn(
             toolbarActionClass,
             showChat
-              ? "bg-blue-600 text-white shadow-blue-900/20"
+              ? "bg-blue-600 text-white"
               : "bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700"
           )}
         >
@@ -81,7 +83,7 @@ export const TopBar = React.memo(({
         </button>
 
         {isCurrentlyDebugging ? (
-          <div className="flex items-center gap-2 bg-zinc-950 px-2 py-1 rounded-lg border border-amber-500/30 shadow-lg shadow-amber-950/20 animate-fade-in whitespace-nowrap">
+          <div className="flex items-center gap-2 bg-zinc-950 px-2 py-1 rounded-lg border border-amber-500/30 animate-fade-in whitespace-nowrap">
             <div className="flex items-center gap-1 text-[10px] uppercase font-mono text-amber-500 font-bold px-1.5 bg-amber-500/10 border border-amber-500/20 rounded mr-1">
               Line {currentDebugLine}
             </div>
@@ -136,7 +138,7 @@ export const TopBar = React.memo(({
                 toolbarActionClass,
                 isRunning && !isDebugStyleMode
                   ? "bg-zinc-800 text-zinc-500 cursor-not-allowed"
-                  : "bg-amber-600 hover:bg-amber-500 text-white shadow-amber-900/20"
+                  : "bg-amber-600 hover:bg-amber-500 text-white"
               )}
             >
               <Bug size={14} className={cn(isDebugStyleMode && "animate-pulse")} />
@@ -152,8 +154,8 @@ export const TopBar = React.memo(({
                 isDebugStyleMode
                   ? "bg-zinc-800 text-zinc-500 cursor-not-allowed"
                   : isRunning
-                    ? "bg-red-600 hover:bg-red-500 text-white shadow-red-900/20"
-                    : "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-900/20"
+                    ? "bg-red-600 hover:bg-red-500 text-white"
+                    : "bg-emerald-600 hover:bg-emerald-500 text-white"
               )}
             >
               {isRunning && !isDebugStyleMode ? (
@@ -172,7 +174,7 @@ export const TopBar = React.memo(({
         )}
 
         <div className="hidden h-6 w-px bg-zinc-800 mx-1 sm:block" />
-        <button type="button" className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-all shrink-0">
+        <button type="button" onClick={onOpenSettings} title="Settings" aria-label="Open settings" className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-white transition-all shrink-0">
           <Settings size={18} />
         </button>
       </div>

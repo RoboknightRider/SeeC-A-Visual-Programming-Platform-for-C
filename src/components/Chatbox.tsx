@@ -546,10 +546,10 @@ export const Chatbox: React.FC<ChatboxProps> = ({
               className={cn(
                 "p-3 rounded-lg max-w-[85%] break-words border transition-colors",
                 isUser 
-                  ? "bg-blue-600/20 border-blue-500/40 text-blue-200 self-end" 
+                  ? "bg-blue-700 border-blue-600 text-white self-end" 
                   : isLocal
-                    ? "bg-amber-950/30 border-amber-500/30 text-amber-100 self-start" // Local AI Style
-                    : "bg-emerald-950/30 border-emerald-500/30 text-emerald-100 self-start" // Gemini Style
+                    ? "bg-amber-950 border-amber-700 text-amber-100 self-start" // Local AI Style
+                    : "bg-emerald-950 border-emerald-700 text-emerald-100 self-start" // Gemini Style
               )}
             >
               {/* Render Provider Badge for AI messages */}

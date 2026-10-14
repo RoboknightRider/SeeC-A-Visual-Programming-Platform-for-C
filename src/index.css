@@ -34,6 +34,128 @@
   }
 }
 
+html[data-theme="light"] body {
+  background-color: #f4f7f5;
+  color: #18211f;
+}
+
+html[data-theme="light"] [class~="bg-zinc-950"],
+html[data-theme="light"] [class~="bg-black/20"],
+html[data-theme="light"] [class~="bg-black/40"] {
+  background-color: #f4f7f5;
+}
+
+html[data-theme="light"] [class~="bg-zinc-950/95"] {
+  background-color: rgb(244 247 245 / 0.97);
+}
+
+html[data-theme="light"] [class~="bg-zinc-900"],
+html[data-theme="light"] [class~="bg-zinc-900/80"],
+html[data-theme="light"] [class~="bg-zinc-900/90"] {
+  background-color: #ffffff;
+}
+
+html[data-theme="light"] [class~="bg-zinc-900/50"] {
+  background-color: rgb(255 255 255 / 0.94);
+}
+
+html[data-theme="light"] [class~="bg-zinc-800"],
+html[data-theme="light"] [class~="bg-zinc-800/50"],
+html[data-theme="light"] [class~="bg-zinc-800/40"] {
+  background-color: #e8eeea;
+}
+
+html[data-theme="light"] [class~="bg-zinc-700"] {
+  background-color: #dce4df;
+}
+
+html[data-theme="light"] [class~="bg-blue-700"] {
+  background-color: #dbeafe;
+  border-color: #93c5fd;
+  color: #1e3a8a;
+}
+
+html[data-theme="light"] [class~="bg-amber-950"] {
+  background-color: #fef3c7;
+  border-color: #fbbf24;
+  color: #78350f;
+}
+
+html[data-theme="light"] [class~="bg-emerald-950"] {
+  background-color: #d1fae5;
+  border-color: #6ee7b7;
+  color: #064e3b;
+}
+
+html[data-theme="light"] [class~="text-white"] {
+  color: #18211f;
+}
+
+html[data-theme="light"] [class~="bg-blue-600"][class~="text-white"],
+html[data-theme="light"] [class~="bg-emerald-600"][class~="text-white"],
+html[data-theme="light"] [class~="bg-amber-600"][class~="text-white"],
+html[data-theme="light"] [class~="bg-amber-700"][class~="text-white"],
+html[data-theme="light"] [class~="bg-amber-800"][class~="text-white"],
+html[data-theme="light"] [class~="bg-red-600"][class~="text-white"],
+html[data-theme="light"] [class~="bg-purple-600"][class~="text-white"] {
+  color: #ffffff;
+}
+
+html[data-theme="light"] [class~="text-zinc-100"],
+html[data-theme="light"] [class~="text-zinc-200"] {
+  color: #26332e;
+}
+
+html[data-theme="light"] [class~="text-zinc-300"] {
+  color: #3c4a44;
+}
+
+html[data-theme="light"] [class~="text-zinc-400"] {
+  color: #5c6b64;
+}
+
+html[data-theme="light"] [class~="text-zinc-500"],
+html[data-theme="light"] [class~="text-zinc-600"] {
+  color: #75837c;
+}
+
+html[data-theme="light"] [class~="border-zinc-800"],
+html[data-theme="light"] [class~="border-zinc-800/50"] {
+  border-color: #dce4df;
+}
+
+html[data-theme="light"] [class~="border-zinc-700"],
+html[data-theme="light"] [class~="border-zinc-700/50"] {
+  border-color: #ccd7d0;
+}
+
+html[data-theme="light"] [class~="hover:bg-zinc-800"]:hover,
+html[data-theme="light"] [class~="hover:bg-zinc-800/50"]:hover,
+html[data-theme="light"] [class~="hover:bg-zinc-700"]:hover {
+  background-color: #e1e9e4;
+}
+
+html[data-theme="light"] [class~="hover:text-white"]:hover,
+html[data-theme="light"] [class~="hover:text-zinc-100"]:hover,
+html[data-theme="light"] [class~="hover:text-zinc-200"]:hover {
+  color: #18211f;
+}
+
+html[data-theme="light"] .react-flow__controls,
+html[data-theme="light"] .react-flow__controls-button,
+html[data-theme="light"] .react-flow__minimap {
+  background-color: #ffffff !important;
+  border-color: #dce4df !important;
+}
+
+html[data-theme="light"] .react-flow__controls-button {
+  fill: #5c6b64 !important;
+}
+
+html[data-theme="light"] .react-flow__background {
+  background-color: #f4f7f5;
+}
+
 .react-flow__node {
   @apply rounded-xl border-2 shadow-lg;
   transition: transform 500ms cubic-bezier(0.4, 0, 0.2, 1), opacity 300ms ease-out;

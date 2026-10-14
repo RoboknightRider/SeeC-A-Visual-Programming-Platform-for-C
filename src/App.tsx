@@ -8,6 +8,7 @@ import { TopBar } from './components/TopBar';
 import { Sidebar } from './components/NodePalette';
 import { TerminalPanel } from './components/TerminalPanel';
 import { CodePreview } from './components/GeneratedCodePanel';
+import { SettingsDialog } from './components/SettingsDialog';
 import { useGlobalTerminal, TerminalMessage } from './services/webhooks';
 
 // --- Main Component ---
@@ -38,6 +39,10 @@ function Flow() {
 
   // Chat / import modal state
   const [showChat, setShowChat] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    return localStorage.getItem('seec-theme') === 'light' ? 'light' : 'dark';
+  });
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const flowActionsRef = React.useRef<import('./components/FlowCanvas').FlowCanvasActions | null>(null);
 
@@ -339,8 +344,13 @@ function Flow() {
     flowActionsRef.current?.addNode(type);
   }, []);
 
+  React.useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('seec-theme', theme);
+  }, [theme]);
+
   return (
-    <div className="flex flex-col h-screen w-screen bg-zinc-950 overflow-hidden">
+    <div data-theme={theme} className="flex flex-col h-screen w-screen bg-zinc-950 overflow-hidden">
       <input
         type="file"
         ref={fileInputRef}
@@ -365,6 +375,14 @@ function Flow() {
         loadProject={loadProject}
         showChat={showChat}
         setShowChat={setShowChat}
+        onOpenSettings={() => setShowSettings(true)}
+      />
+
+      <SettingsDialog
+        open={showSettings}
+        theme={theme}
+        onClose={() => setShowSettings(false)}
+        onThemeChange={setTheme}
       />
 
       <div className="flex flex-1 overflow-hidden">

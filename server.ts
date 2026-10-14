@@ -689,17 +689,6 @@ function immediateShutdown(httpServer: any, wss: WebSocketServer) {
     try { cleanupClientFiles(session); } catch (e) {}
   });
 
-  // Best-effort: remove remaining SessionFiles root to ensure no temp files remain
-  try {
-    const sessionsRoot = path.join(process.cwd(), 'SessionFiles');
-    if (fs.existsSync(sessionsRoot)) {
-      wsLog(`Deleting SessionFiles root: ${sessionsRoot}`);
-      fs.rmSync(sessionsRoot, { recursive: true, force: true });
-    }
-  } catch (e) {
-    console.error('Error removing SessionFiles root during shutdown:', e);
-  }
-
   // Try to close servers quickly, then exit
   try { httpServer && httpServer.close && httpServer.close(); } catch (e) {}
 
