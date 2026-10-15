@@ -5,6 +5,8 @@ import { cn } from '../lib/utils';
 export const CodePreview = React.memo(({
   codePanelOpen,
   setCodePanelOpen,
+  codePanelWidth,
+  onResizeStart,
   generatedCode,
   onCodeChange,
   copyToClipboard,
@@ -17,6 +19,8 @@ export const CodePreview = React.memo(({
 }: {
   codePanelOpen: boolean;
   setCodePanelOpen: (open: boolean) => void;
+  codePanelWidth: number;
+  onResizeStart: (event: React.PointerEvent<HTMLDivElement>) => void;
   generatedCode: string;
   onCodeChange: (code: string) => void;
   copyToClipboard: () => void;
@@ -28,9 +32,19 @@ export const CodePreview = React.memo(({
   currentDebugLine: number | null;
 }) => (
   <div className={cn(
-    "border-l border-zinc-800 bg-zinc-900/50 flex flex-col transition-all duration-300 relative",
-    codePanelOpen ? "w-96" : "w-12"
-  )}>
+    "border-l border-zinc-800 bg-zinc-900/50 flex flex-col shrink-0 relative",
+    !codePanelOpen && "w-12"
+  )} style={{ width: codePanelOpen ? codePanelWidth : 48 }}>
+    {codePanelOpen && (
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize code panel"
+        title="Drag to resize code panel"
+        onPointerDown={onResizeStart}
+        className="absolute left-0 top-0 z-40 h-full w-1.5 cursor-col-resize touch-none hover:bg-emerald-500/40"
+      />
+    )}
     <button
       onClick={() => setCodePanelOpen(!codePanelOpen)}
       className="absolute right-full top-1/2 -translate-y-1/2 ml-1 z-50 bg-zinc-800 border border-zinc-700 rounded-full p-2 text-zinc-400 hover:text-white transition-all shadow-xl hover:scale-110 flex items-center justify-center"
@@ -39,10 +53,10 @@ export const CodePreview = React.memo(({
       {codePanelOpen ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
     </button>
 
-    <div className={cn("p-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-900", !codePanelOpen && "justify-center")}>
+    <div className={cn("p-2 border-b border-zinc-800 flex items-center justify-between bg-zinc-900", !codePanelOpen && "justify-center")}>
       <div className="flex items-center gap-2">
         <Code className="w-4 h-4 text-emerald-500 shrink-0" />
-        {codePanelOpen && <span className="text-sm font-bold text-zinc-100 truncate">Generated C Code</span>}
+        {codePanelOpen && <span className="text-sm font-bold text-zinc-100 truncate">Code</span>}
       </div>
       {codePanelOpen && (
         <div className="flex items-center gap-1">
@@ -57,7 +71,7 @@ export const CodePreview = React.memo(({
           <button
             onClick={copyToClipboard}
             className="flex items-center gap-2 px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-300 transition-all border border-zinc-700"
-            title="Copy generated code"
+            title="Copy code"
           >
             {copied ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
             {copied ? 'Copied!' : 'Copy'}
@@ -99,7 +113,7 @@ export const CodePreview = React.memo(({
               }
             }}
             spellCheck={false}
-            aria-label="Editable generated C code"
+            aria-label="Editable C code"
             className="relative w-full h-full min-h-[16rem] resize-none bg-transparent text-transparent caret-emerald-400 selection:bg-emerald-500/30 leading-relaxed outline-none overflow-auto whitespace-pre"
           />
         </div>

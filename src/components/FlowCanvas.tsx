@@ -4,6 +4,7 @@ import {
   addEdge,
   Background,
   Controls,
+  ControlButton,
   MiniMap,
   useNodesState,
   useEdgesState,
@@ -15,7 +16,7 @@ import {
   ConnectionLineType,
   useNodesInitialized,
 } from '@xyflow/react';
-import { X, Trash2, Layout, Copy, Clipboard, Undo2, Redo2 } from 'lucide-react';
+import { X, Trash2, Layout, Copy, Clipboard, Undo2, Redo2, Map as MapIcon, EyeOff } from 'lucide-react';
 import { BaseNode, NODE_REGISTRY, NodeData } from './Nodes';
 import { generateCCode } from '../services/codeGenerator';
 import { parseCodeToNodes } from '../services/codeParser';
@@ -316,6 +317,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editin
   const { screenToFlowPosition, deleteElements, getNodes, getEdges, fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const [showMiniMap, setShowMiniMap] = React.useState(true);
   
   const nodesInitialized = useNodesInitialized();
 
@@ -730,6 +732,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editin
   }, [nodesInitialized, nodes.length, handleLayout]);
 
   return (
+    <div className="seec-flow-canvas relative h-full w-full">
     <ReactFlow
       nodes={nodes}
       edges={edges}
@@ -764,8 +767,17 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editin
       className={editingDisabled ? 'bg-zinc-950 seec-execution-view' : 'bg-zinc-950'}
     >
       <Background color="#27272a" variant={undefined} gap={GRID_SIZE} />
-      <Controls />
-      <MiniMap />
+      <Controls>
+        <ControlButton
+          onClick={() => setShowMiniMap((visible) => !visible)}
+          title={showMiniMap ? 'Hide minimap' : 'Show minimap'}
+          aria-label={showMiniMap ? 'Hide minimap' : 'Show minimap'}
+          aria-pressed={showMiniMap}
+        >
+          {showMiniMap ? <MapIcon /> : <EyeOff />}
+        </ControlButton>
+      </Controls>
+      {showMiniMap && <MiniMap />}
       
       <Panel position="top-right" className="flex gap-2">
         <div className="bg-zinc-900/80 backdrop-blur-md border border-zinc-800 p-2 rounded-lg flex gap-2">
@@ -831,5 +843,6 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editin
         </div>
       </Panel>
     </ReactFlow>
+    </div>
   );
 });

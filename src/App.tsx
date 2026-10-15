@@ -22,6 +22,32 @@ function Flow() {
   // Layout panel state
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [codePanelOpen, setCodePanelOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [codePanelWidth, setCodePanelWidth] = useState(384);
+
+  const handlePanelResize = useCallback((panel: 'sidebar' | 'code', event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = panel === 'sidebar' ? sidebarWidth : codePanelWidth;
+    const direction = panel === 'sidebar' ? 1 : -1;
+    const minWidth = panel === 'sidebar' ? 168 : 240;
+    const maxWidth = panel === 'sidebar' ? 420 : 600;
+
+    const handlePointerMove = (pointerEvent: PointerEvent) => {
+      const width = Math.min(maxWidth, Math.max(minWidth, startWidth + (pointerEvent.clientX - startX) * direction));
+      if (panel === 'sidebar') setSidebarWidth(width);
+      else setCodePanelWidth(width);
+    };
+    const stopResizing = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResizing);
+      window.removeEventListener('pointercancel', stopResizing);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResizing, { once: true });
+    window.addEventListener('pointercancel', stopResizing, { once: true });
+  }, [sidebarWidth, codePanelWidth]);
 
   // Runtime / terminal state
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -389,6 +415,8 @@ function Flow() {
         <Sidebar
           sidebarOpen={sidebarOpen}
           setSidebarOpen={setSidebarOpen}
+          sidebarWidth={sidebarWidth}
+          onResizeStart={(event) => handlePanelResize('sidebar', event)}
           addNode={addNode}
           onDragStart={onDragStart}
         />
@@ -422,6 +450,8 @@ function Flow() {
         <CodePreview
           codePanelOpen={codePanelOpen}
           setCodePanelOpen={setCodePanelOpen}
+          codePanelWidth={codePanelWidth}
+          onResizeStart={(event) => handlePanelResize('code', event)}
           generatedCode={generatedCode}
           onCodeChange={setGeneratedCode}
           copyToClipboard={copyToClipboard}

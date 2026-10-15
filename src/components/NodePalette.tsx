@@ -30,18 +30,32 @@ const getCategoriesInDisplayOrder = (): string[] => {
 export const Sidebar = React.memo(({
   sidebarOpen,
   setSidebarOpen,
+  sidebarWidth,
+  onResizeStart,
   addNode,
   onDragStart
 }: {
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
+  sidebarWidth: number;
+  onResizeStart: (event: React.PointerEvent<HTMLDivElement>) => void;
   addNode: (type: string) => void;
   onDragStart: (event: React.DragEvent, nodeType: string) => void;
 }) => (
   <div className={cn(
-    "border-r border-zinc-800 bg-zinc-900/50 flex flex-col transition-all duration-300 relative",
-    sidebarOpen ? "w-64" : "w-12"
-  )}>
+    "border-r border-zinc-800 bg-zinc-900/50 flex flex-col shrink-0 relative",
+    !sidebarOpen && "w-12"
+  )} style={{ width: sidebarOpen ? sidebarWidth : 48 }}>
+    {sidebarOpen && (
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize node palette"
+        title="Drag to resize node palette"
+        onPointerDown={onResizeStart}
+        className="absolute right-0 top-0 z-40 h-full w-1.5 cursor-col-resize touch-none hover:bg-emerald-500/40"
+      />
+    )}
     <button
       onClick={() => setSidebarOpen(!sidebarOpen)}
       className="absolute left-full top-1/2 -translate-y-1/2 ml-1 z-50 bg-zinc-800 border border-zinc-700 rounded-full p-2 text-zinc-400 hover:text-white transition-all shadow-xl hover:scale-110 flex items-center justify-center"

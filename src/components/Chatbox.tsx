@@ -79,7 +79,7 @@ const CHAT_TEXT = {
 };
 
 const MESSAGE_MARKDOWN_CLASSES = cn(
-  'prose prose-invert max-w-none text-xs space-y-1.5',
+  'chat-markdown prose prose-invert max-w-none text-xs space-y-1.5',
   '[&_strong]:font-bold [&_strong]:text-white',
   '[&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4',
   '[&_code]:bg-zinc-950 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:font-mono [&_code]:text-[11px]',

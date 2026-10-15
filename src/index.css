@@ -4,6 +4,16 @@
   pointer-events: none !important;
 }
 
+.seec-flow-canvas {
+  container-type: inline-size;
+}
+
+@container (max-width: 640px) {
+  .seec-flow-canvas .react-flow__minimap {
+    display: none;
+  }
+}
+
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
@@ -37,6 +47,27 @@
 html[data-theme="light"] body {
   background-color: #f4f7f5;
   color: #18211f;
+}
+
+html[data-theme="light"] .chat-markdown code,
+html[data-theme="light"] .chat-markdown pre {
+  background-color: #ffffff;
+  border: 1px solid #dce4df;
+  color: #26332e;
+}
+
+html[data-theme="light"] .chat-markdown pre code {
+  background-color: transparent;
+  border: 0;
+}
+
+html[data-theme="light"] .chat-markdown strong {
+  color: #26332e;
+}
+
+html[data-theme="light"] [class~="bg-emerald-500/20"] {
+  background-color: #d1fae5;
+  color: #14532d;
 }
 
 html[data-theme="light"] [class~="bg-zinc-950"],
