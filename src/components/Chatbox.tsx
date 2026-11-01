@@ -46,6 +46,7 @@ const CHAT_CONFIG = {
   resizeViewportPadding: 24,
   recentMessageCount: 6,
   summaryMessageThreshold: 10,
+  summaryBatchSize: 4,
   copyFeedbackDurationMs: 1200,
   scrollBehavior: 'smooth' as ScrollBehavior,
 };
@@ -54,6 +55,7 @@ const CHAT_STORAGE_KEYS = {
   provider: 'seec-ai-provider',
   messages: 'seec-chat-messages',
   summary: 'seec-chat-summary',
+  summaryCount: 'seec-chat-summary-count',
 };
 
 const AI_PROVIDER_LABELS: Record<AIProvider, string> = {
@@ -94,9 +96,10 @@ function getRecentMessages(allMessages: Message[]): Message[] {
   return allMessages.slice(-CHAT_CONFIG.recentMessageCount);
 }
 
-function getMessagesToSummarize(allMessages: Message[]): Message[] {
+// Returns older messages (outside the recent window) not yet folded into the summary.
+function getMessagesToSummarize(allMessages: Message[], summarizedCount: number): Message[] {
   const olderMessageCount = allMessages.length - CHAT_CONFIG.recentMessageCount;
-  return olderMessageCount > 0 ? allMessages.slice(0, olderMessageCount) : [];
+  return olderMessageCount > summarizedCount ? allMessages.slice(summarizedCount, olderMessageCount) : [];
 }
 
 function buildSummaryPrompt(messagesToSummarize: Message[], existingSummary: string): string {
@@ -196,6 +199,15 @@ const getSavedSummary = (): string => {
   return window.localStorage.getItem(CHAT_STORAGE_KEYS.summary) || '';
 };
 
+const getSavedSummaryCount = (): number => {
+  if (typeof window === 'undefined') {
+    return 0;
+  }
+
+  const parsed = Number(window.localStorage.getItem(CHAT_STORAGE_KEYS.summaryCount));
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
+};
+
 export const Chatbox: React.FC<ChatboxProps> = ({
   showChat,
   setShowChat,
@@ -210,13 +222,17 @@ export const Chatbox: React.FC<ChatboxProps> = ({
   const [geminiAvailable, setGeminiAvailable] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [chatboxSize, setChatboxSize] = useState({ width: CHAT_CONFIG.defaultWidth, height: CHAT_CONFIG.defaultHeight });
-  const [contextSummary, setContextSummary] = useState(getSavedSummary());
+  const [contextSummary, setContextSummary] = useState(getSavedSummary);
+  const [summarizedCount, setSummarizedCount] = useState(getSavedSummaryCount);
+  const isSummarizingRef = useRef(false);
 
   const [aiProvider, setAiProvider] = useState<AIProvider>(getInitialProvider);
 
   const updateContextSummary = useCallback(async (allMessages: Message[]) => {
-    const messagesToSummarize = getMessagesToSummarize(allMessages);
-    if (messagesToSummarize.length === 0) {
+    // Only summarize messages not already folded in, and batch them to avoid an extra AI call per reply.
+    const startIndex = Math.min(summarizedCount, allMessages.length);
+    const messagesToSummarize = getMessagesToSummarize(allMessages, startIndex);
+    if (messagesToSummarize.length < CHAT_CONFIG.summaryBatchSize || isSummarizingRef.current) {
       return;
     }
 
@@ -225,11 +241,19 @@ export const Chatbox: React.FC<ChatboxProps> = ({
       return;
     }
 
-    const res = await askAI(prompt, [], aiProvider, contextSummary);
-    if (res.text && typeof res.text === 'string') {
-      setContextSummary(res.text.trim());
+    isSummarizingRef.current = true;
+    try {
+      // The existing summary is already embedded in the prompt, so it is not sent again as context.
+      const res = await askAI(prompt, [], aiProvider);
+      // Ignore fallback notices and connection errors so they never replace a real summary.
+      if (res.usedProvider === aiProvider && typeof res.text === 'string' && res.text.trim() && !res.text.startsWith('Error connecting')) {
+        setContextSummary(res.text.trim());
+        setSummarizedCount(startIndex + messagesToSummarize.length);
+      }
+    } finally {
+      isSummarizingRef.current = false;
     }
-  }, [aiProvider, contextSummary]);
+  }, [aiProvider, contextSummary, summarizedCount]);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const resizeStateRef = useRef<{ startX: number; startY: number; startWidth: number; startHeight: number } | null>(null);
@@ -285,7 +309,8 @@ export const Chatbox: React.FC<ChatboxProps> = ({
 
     window.localStorage.setItem(CHAT_STORAGE_KEYS.messages, JSON.stringify(messages));
     window.localStorage.setItem(CHAT_STORAGE_KEYS.summary, contextSummary);
-  }, [messages, contextSummary]);
+    window.localStorage.setItem(CHAT_STORAGE_KEYS.summaryCount, String(summarizedCount));
+  }, [messages, contextSummary, summarizedCount]);
 
   useEffect(() => {
     if (isFullscreen) {
@@ -345,10 +370,12 @@ export const Chatbox: React.FC<ChatboxProps> = ({
     setCopiedCodeKey(null);
     setIsLoading(false);
     setContextSummary('');
+    setSummarizedCount(0);
 
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(CHAT_STORAGE_KEYS.messages);
       window.localStorage.removeItem(CHAT_STORAGE_KEYS.summary);
+      window.localStorage.removeItem(CHAT_STORAGE_KEYS.summaryCount);
     }
 
     if (clearInitialError) {

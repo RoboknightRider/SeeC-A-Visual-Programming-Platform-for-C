@@ -11,6 +11,7 @@ export function useGlobalTerminal(
   const wsRef = useRef<WebSocket | null>(null);
   const isConnectingRef = useRef(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isUnmountedRef = useRef(false);
 
   // Log helper for debugging (no-op in production)
   const debugLog = useCallback((message: string) => {
@@ -33,6 +34,7 @@ export function useGlobalTerminal(
 
   // Establish WebSocket connection
   const connect = useCallback(() => {
+    if (isUnmountedRef.current) return;
     if (isConnectingRef.current || wsRef.current?.readyState === WebSocket.OPEN) {
       debugLog('Connection already established or in progress');
       return;
@@ -66,12 +68,16 @@ export function useGlobalTerminal(
       ws.onclose = () => {
         debugLog('✗ WebSocket disconnected');
         isConnectingRef.current = false;
-        wsRef.current = null;
+        if (wsRef.current === ws) wsRef.current = null;
 
-        // Attempt to reconnect after 3 seconds
-        if (!reconnectTimeoutRef.current) {
+        // Attempt to reconnect after 3 seconds (never after unmount)
+        if (!isUnmountedRef.current && !reconnectTimeoutRef.current) {
           debugLog('Scheduling reconnection in 3 seconds...');
-          reconnectTimeoutRef.current = setTimeout(connect, 3000);
+          reconnectTimeoutRef.current = setTimeout(() => {
+            // Clear first so a failed attempt can schedule the next retry.
+            reconnectTimeoutRef.current = null;
+            connect();
+          }, 3000);
         }
       };
 
@@ -89,14 +95,21 @@ export function useGlobalTerminal(
 
   // Initialize connection on mount
   useEffect(() => {
+    isUnmountedRef.current = false;
     connect();
 
     return () => {
+      isUnmountedRef.current = true;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.close();
+      // Close sockets that are still connecting too, otherwise they leak (e.g. StrictMode remounts).
+      const ws = wsRef.current;
+      wsRef.current = null;
+      isConnectingRef.current = false;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        ws.close();
       }
     };
   }, [connect]);
@@ -124,51 +137,17 @@ export function useGlobalTerminal(
     }
   }, [debugLog]);
 
-  // Send RUN_CODE action
-  const runCode = useCallback((codeString: string) => {
-    sendAction('RUN_CODE', codeString);
-  }, [sendAction]);
-
-  // Send DEBUG action
-  const startDebug = useCallback((codeString: string) => {
-    sendAction('DEBUG', codeString);
-  }, [sendAction]);
-
-  // Send DEBUG_STEP_OVER action
-  const debugStepOver = useCallback(() => {
-    sendAction('DEBUG_STEP_OVER');
-  }, [sendAction]);
-
-  // Send DEBUG_STEP_INTO action
-  const debugStepInto = useCallback(() => {
-    sendAction('DEBUG_STEP_INTO');
-  }, [sendAction]);
-
-  // Send DEBUG_STEP_OUT action
-  const debugStepOut = useCallback(() => {
-    sendAction('DEBUG_STEP_OUT');
-  }, [sendAction]);
-
-  // Send SEND_INPUT action
-  const sendInput = useCallback((text: string) => {
-    sendAction('SEND_INPUT', text, `✓ Input sent: ${text}`);
-  }, [sendAction]);
-
-  // Send STOP_EXECUTION action
-  const stopExecution = useCallback(() => {
-    sendAction('STOP_EXECUTION');
-  }, [sendAction]);
-
-  const isConnected = wsRef.current?.readyState === WebSocket.OPEN;
+  const runCode = useCallback((codeString: string) => sendAction('RUN_CODE', codeString), [sendAction]);
+  const startDebug = useCallback((codeString: string) => sendAction('DEBUG', codeString), [sendAction]);
+  const debugStep = useCallback((mode: 'OVER' | 'INTO' | 'OUT') => sendAction(`DEBUG_STEP_${mode}`), [sendAction]);
+  const sendInput = useCallback((text: string) => sendAction('SEND_INPUT', text, `✓ Input sent: ${text}`), [sendAction]);
+  const stopExecution = useCallback(() => sendAction('STOP_EXECUTION'), [sendAction]);
 
   return {
     runCode,
     sendInput,
     stopExecution,
     startDebug,
-    debugStepOver,
-    debugStepInto,
-    debugStepOut,
-    isConnected,
+    debugStep,
   };
 }

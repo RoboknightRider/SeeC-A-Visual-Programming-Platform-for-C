@@ -32,7 +32,6 @@ export const TerminalPanel = React.memo(({
 
   const terminalContentRef = React.useRef<HTMLDivElement>(null);
   const panelRef = React.useRef<HTMLDivElement>(null);
-  const terminalBottomRef = React.useRef<HTMLDivElement>(null);
   const isResizingRef = React.useRef(false);
   const dragStartYRef = React.useRef(0);
   const startHeightRef = React.useRef(terminalHeight);
@@ -107,8 +106,11 @@ export const TerminalPanel = React.memo(({
   }, [clampTerminalHeight, setTerminalHeight, terminalOpen]);
 
   React.useEffect(() => {
-    if (terminalOpen) {
-      terminalBottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    // Scroll only the log container; a smooth scrollIntoView per output chunk queues
+    // overlapping animations under fast output and can also scroll ancestor elements.
+    const container = terminalContentRef.current;
+    if (terminalOpen && container) {
+      container.scrollTop = container.scrollHeight;
     }
   }, [terminalLogs, terminalOpen]);
 
@@ -185,7 +187,6 @@ export const TerminalPanel = React.memo(({
                 </button>
               </div>
             )}
-            <div ref={terminalBottomRef} />
           </div>
           <div className="border-t border-zinc-800 p-3 bg-zinc-950/95 flex items-center gap-2">
             <input

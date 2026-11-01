@@ -32,6 +32,39 @@ export interface NodeContext {
 
 const getIndent = (level: number) => '    '.repeat(level);
 
+// Generates the code chained from one of a node's source handles ('' when nothing is connected).
+const traverseHandle = ({ node, edges, traverse }: NodeContext, handle: 'body' | 'next', indentLevel: number) => {
+  const edge = edges.find(e => e.source === node.id && e.sourceHandle === handle);
+  return edge ? traverse(edge.target, indentLevel) : '';
+};
+
+// Builds a node's statement form from its expression form: `<indent><expression>;`.
+const asStatement = (toExpression: (ctx: NodeContext) => string) =>
+  (ctx: NodeContext) => `${getIndent(ctx.indentLevel)}${toExpression(ctx)};\n`;
+
+const functionCallExpression = ({ node, getFieldValue }: NodeContext) =>
+  `${(node.data as unknown as NodeData).varName || 'func'}(${getFieldValue('params') || ''})`;
+
+const freeExpression = ({ node, getFieldValue }: NodeContext) =>
+  `free(${getFieldValue('varName') || (node.data as unknown as NodeData).varName || 'items'})`;
+
+const arithmeticExpression = ({ node, getFieldValue }: NodeContext) => {
+  const data = node.data as unknown as NodeData;
+  return `${data.varName || 'x'} ${data.operator || '+'}= ${getFieldValue('value') || '0'}`;
+};
+
+const literalExpression = ({ getFieldValue }: NodeContext) => getFieldValue('value');
+
+// Emits a body block for if / else-if, keeping a following else on the same line as the closing brace.
+const closeConditionalBlock = (ctx: NodeContext, header: string) => {
+  const { node, nodes, edges, indentLevel } = ctx;
+  const indent = getIndent(indentLevel);
+  const code = `${header} {\n${traverseHandle(ctx, 'body', indentLevel + 1)}${indent}}`;
+  const nextEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'next');
+  const nextType = nextEdge ? nodes.find(n => n.id === nextEdge.target)?.data.type : undefined;
+  return code + (nextType === 'else' || nextType === 'else-if' ? ' ' : '\n');
+};
+
 export interface NodeField {
   key: string;
   label?: string;
@@ -125,21 +158,8 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     ],
     syntax: 'if ({{condition}}) {',
     body: true,
-    toCode: ({ node, nodes, edges, indentLevel, traverse, getFieldValue }) => {
-      const indent = getIndent(indentLevel);
-      const condition = getFieldValue('condition');
-      let code = `${indent}if (${condition || '1'}) {\n`;
-      const bodyEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'body');
-      if (bodyEdge) code += traverse(bodyEdge.target, indentLevel + 1);
-      code += `${indent}}`;
-      
-      const nextEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'next');
-      const nextNode = nextEdge ? nodes.find(n => n.id === nextEdge.target) : null;
-      if (nextNode && (nextNode.data.type === 'else' || nextNode.data.type === 'else-if')) {
-        return code + ' ';
-      }
-      return code + '\n';
-    }
+    toCode: (ctx) =>
+      closeConditionalBlock(ctx, `${getIndent(ctx.indentLevel)}if (${ctx.getFieldValue('condition') || '1'})`)
   },
   'else-if': {
     type: 'else-if',
@@ -154,21 +174,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     syntax: 'else if ({{condition}}) {',
     strictPrev: ['if', 'else-if'],
     body: true,
-    toCode: ({ node, nodes, edges, indentLevel, traverse, getFieldValue }) => {
-      const indent = getIndent(indentLevel);
-      const condition = getFieldValue('condition');
-      let code = `else if (${condition || '1'}) {\n`;
-      const bodyEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'body');
-      if (bodyEdge) code += traverse(bodyEdge.target, indentLevel + 1);
-      code += `${indent}}`;
-
-      const nextEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'next');
-      const nextNode = nextEdge ? nodes.find(n => n.id === nextEdge.target) : null;
-      if (nextNode && (nextNode.data.type === 'else' || nextNode.data.type === 'else-if')) {
-        return code + ' ';
-      }
-      return code + '\n';
-    }
+    toCode: (ctx) => closeConditionalBlock(ctx, `else if (${ctx.getFieldValue('condition') || '1'})`)
   },
   else: {
     type: 'else',
@@ -180,14 +186,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     syntax: 'else {',
     strictPrev: ['if', 'else-if'],
     body: true,
-    toCode: ({ node, edges, indentLevel, traverse }) => {
-      const indent = getIndent(indentLevel);
-      let code = `else {\n`;
-      const bodyEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'body');
-      if (bodyEdge) code += traverse(bodyEdge.target, indentLevel + 1);
-      code += `${indent}}\n`;
-      return code;
-    }
+    toCode: (ctx) => `else {\n${traverseHandle(ctx, 'body', ctx.indentLevel + 1)}${getIndent(ctx.indentLevel)}}\n`
   },
   while: {
     type: 'while',
@@ -201,14 +200,10 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     ],
     syntax: 'while ({{condition}}) {',
     body: true,
-    toCode: ({ node, edges, indentLevel, traverse, getFieldValue }) => {
-      const indent = getIndent(indentLevel);
-      const condition = getFieldValue('condition');
-      let code = `${indent}while (${condition || '1'}) {\n`;
-      const bodyEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'body');
-      if (bodyEdge) code += traverse(bodyEdge.target, indentLevel + 1);
-      code += `${indent}}\n`;
-      return code;
+    toCode: (ctx) => {
+      const indent = getIndent(ctx.indentLevel);
+      const body = traverseHandle(ctx, 'body', ctx.indentLevel + 1);
+      return `${indent}while (${ctx.getFieldValue('condition') || '1'}) {\n${body}${indent}}\n`;
     }
   },
   'do-while': {
@@ -224,14 +219,10 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     syntax: 'do {',
     tailSyntax: 'while ({{condition}});',
     body: true,
-    toCode: ({ node, edges, indentLevel, traverse, getFieldValue }) => {
-      const indent = getIndent(indentLevel);
-      const condition = getFieldValue('condition');
-      let code = `${indent}do {\n`;
-      const bodyEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'body');
-      if (bodyEdge) code += traverse(bodyEdge.target, indentLevel + 1);
-      code += `${indent}} while (${condition || '1'});\n`;
-      return code;
+    toCode: (ctx) => {
+      const indent = getIndent(ctx.indentLevel);
+      const body = traverseHandle(ctx, 'body', ctx.indentLevel + 1);
+      return `${indent}do {\n${body}${indent}} while (${ctx.getFieldValue('condition') || '1'});\n`;
     }
   },
   for: {
@@ -249,14 +240,11 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     ],
     syntax: 'for ({{init}}; {{condition}}; {{increment}}) {',
     body: true,
-    toCode: ({ node, edges, indentLevel, traverse }) => {
-      const data = node.data as unknown as NodeData;
-      const indent = getIndent(indentLevel);
-      let code = `${indent}for (${data.init || ''}; ${data.condition || '1'}; ${data.increment || ''}) {\n`;
-      const bodyEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'body');
-      if (bodyEdge) code += traverse(bodyEdge.target, indentLevel + 1);
-      code += `${indent}}\n`;
-      return code;
+    toCode: (ctx) => {
+      const data = ctx.node.data as unknown as NodeData;
+      const indent = getIndent(ctx.indentLevel);
+      const body = traverseHandle(ctx, 'body', ctx.indentLevel + 1);
+      return `${indent}for (${data.init || ''}; ${data.condition || '1'}; ${data.increment || ''}) {\n${body}${indent}}\n`;
     }
   },
   switch: {
@@ -271,15 +259,12 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     ],
     syntax: 'switch ({{condition}}) {',
     body: true,
-    toCode: ({ node, edges, indentLevel, traverse }) => {
-      const data = node.data as unknown as NodeData;
-      const indent = getIndent(indentLevel);
-      let code = `${indent}switch (${data.condition || 'x'}) {\n`;
-      const bodyEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'body');
+    toCode: (ctx) => {
+      const data = ctx.node.data as unknown as NodeData;
+      const indent = getIndent(ctx.indentLevel);
       // No indent increment here so cases align with switch
-      if (bodyEdge) code += traverse(bodyEdge.target, indentLevel); 
-      code += `${indent}}\n`;
-      return code;
+      const body = traverseHandle(ctx, 'body', ctx.indentLevel);
+      return `${indent}switch (${data.condition || 'x'}) {\n${body}${indent}}\n`;
     }
   },
   case: {
@@ -298,20 +283,13 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     ],
     strictPrev: ['switch', 'case'],
     body: true,
-    toCode: ({ node, edges, indentLevel, traverse }) => {
-      const data = node.data as unknown as NodeData;
-      const indent = getIndent(indentLevel);
+    toCode: (ctx) => {
+      const data = ctx.node.data as unknown as NodeData;
+      const indent = getIndent(ctx.indentLevel);
       const caseCondition = (data.condition || '').trim();
-      let code = caseCondition ? `${indent}case ${caseCondition}:\n` : `${indent}default:\n`;
-      const bodyEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'body');
-      // Indent the code inside the case
-      if (bodyEdge) code += traverse(bodyEdge.target, indentLevel + 1);
-      
-      // Look for the next case at the same level
-      const nextEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'next');
-      if (nextEdge) code += traverse(nextEdge.target, indentLevel);
-      
-      return code;
+      const label = caseCondition ? `${indent}case ${caseCondition}:\n` : `${indent}default:\n`;
+      // Case body is indented; the next case continues at the same level
+      return label + traverseHandle(ctx, 'body', ctx.indentLevel + 1) + traverseHandle(ctx, 'next', ctx.indentLevel);
     }
   },
   break: {
@@ -350,7 +328,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       'printf({{value}}, {{params}});',
       'printf({{value}});'
     ],
-    toCode: ({ node, indentLevel, getFieldValue }) => {
+    toCode: ({ indentLevel, getFieldValue }) => {
       const indent = getIndent(indentLevel);
       const format = getFieldValue('value') || '"\\n"';
       const params = getFieldValue('params');
@@ -373,7 +351,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       { key: 'params', label: 'Arguments', type: 'text', placeholder: '&x, &y', connectable: true }
     ],
     syntax: 'scanf({{value}}, {{params}});',
-    toCode: ({ node, indentLevel, getFieldValue }) => {
+    toCode: ({ indentLevel, getFieldValue }) => {
       const indent = getIndent(indentLevel);
       const format = getFieldValue('value') || '"%d"';
       const params = getFieldValue('params');
@@ -426,16 +404,8 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       '{{varName}}({{params}});',
       '{{varName}}();'
     ],
-    toCode: ({ node, indentLevel, getFieldValue }) => {
-      const data = node.data as unknown as NodeData;
-      const params = getFieldValue('params');
-      return `${getIndent(indentLevel)}${data.varName || 'func'}(${params || ''});\n`;
-    },
-    toExpression: ({ node, getFieldValue }) => {
-      const data = node.data as unknown as NodeData;
-      const params = getFieldValue('params');
-      return `${data.varName || 'func'}(${params || ''})`;
-    }
+    toCode: asStatement(functionCallExpression),
+    toExpression: functionCallExpression
   },
   malloc: {
     type: 'malloc',
@@ -506,16 +476,8 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       { key: 'varName', label: 'Pointer', type: 'text', placeholder: 'items', connectable: true }
     ],
     syntax: 'free({{varName}});',
-    toCode: ({ node, indentLevel, getFieldValue }) => {
-      const data = node.data as unknown as NodeData;
-      const varName = getFieldValue('varName') || data.varName || 'items';
-      return `${getIndent(indentLevel)}free(${varName});\n`;
-    },
-    toExpression: ({ node, getFieldValue }) => {
-      const data = node.data as unknown as NodeData;
-      const varName = getFieldValue('varName') || data.varName || 'items';
-      return `free(${varName})`;
-    }
+    toCode: asStatement(freeExpression),
+    toExpression: freeExpression
   },
   return: {
     type: 'return',
@@ -529,7 +491,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       { key: 'value', label: 'Value', type: 'text', placeholder: '0', connectable: true }
     ],
     syntax: 'return {{value}};',
-    toCode: ({ node, indentLevel, getFieldValue }) => {
+    toCode: ({ indentLevel, getFieldValue }) => {
       const value = getFieldValue('value');
       return `${getIndent(indentLevel)}return ${value || '0'};\n`;
     }
@@ -643,16 +605,8 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       '{{varName}} {{operator}}= {{value}};',
       '{{varName}}{{operator}}={{value}};'
     ],
-    toCode: ({ node, indentLevel, getFieldValue }) => {
-      const data = node.data as unknown as NodeData;
-      const value = getFieldValue('value');
-      const operator = data.operator || '+';
-      return `${getIndent(indentLevel)}${data.varName || 'x'} ${operator}= ${value || '0'};\n`;
-    },
-    toExpression: ({ node, getFieldValue }) => {
-      const data = node.data as unknown as NodeData;
-      return `${data.varName || 'x'} ${data.operator || '+'}= ${getFieldValue('value') || '0'}`;
-    }
+    toCode: asStatement(arithmeticExpression),
+    toExpression: arithmeticExpression
   },
   comment: {
     type: 'comment',
@@ -680,12 +634,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       { key: 'value', label: 'Value', type: 'text', placeholder: '0' }
     ],
     syntax: '{{value}};',
-    toCode: ({ indentLevel, getFieldValue }) => {
-      const value = getFieldValue('value');
-      return `${getIndent(indentLevel)}${value};\n`;
-    },
-    toExpression: ({ getFieldValue }) => {
-      return getFieldValue('value');
-    }
+    toCode: asStatement(literalExpression),
+    toExpression: literalExpression
   },
 };

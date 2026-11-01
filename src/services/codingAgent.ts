@@ -41,12 +41,22 @@ export function normalizeGeminiApiKey(rawKey?: string): string | null {
 }
 
 export function parseAIRequestPayload(body: AIRequestPayload): ParsedAIRequestPayload | { error: string } {
-  const { prompt, messages, systemInstruction, contextSummary } = body;
+  const { prompt, messages, systemInstruction, contextSummary } = body ?? {};
   if (!prompt || typeof prompt !== 'string') {
     return { error: 'A prompt is required.' };
   }
 
-  return { prompt, messages, systemInstruction, contextSummary };
+  // Drop malformed history entries instead of crashing later on `.map`/`.text` access.
+  const safeMessages = Array.isArray(messages)
+    ? messages.filter((message) => message && typeof message === 'object' && typeof message.text === 'string')
+    : undefined;
+
+  return {
+    prompt,
+    messages: safeMessages,
+    systemInstruction: typeof systemInstruction === 'string' ? systemInstruction : undefined,
+    contextSummary: typeof contextSummary === 'string' ? contextSummary : undefined,
+  };
 }
 
 export function compactChatHistory(messages: ChatMessage[] = [], maxMessages = 12): ChatMessage[] {
@@ -162,15 +172,20 @@ export async function generateGeminiServerResponse(
   systemInstruction: string = SYSTEM_INSTRUCTION,
   contextSummary?: string
 ): Promise<string> {
+  // The system instruction is passed via `config.systemInstruction`; repeating it in
+  // `contents` only doubled the token cost of every request.
   const parts: string[] = [];
-  if (systemInstruction?.trim()) {
-    parts.push(systemInstruction.trim());
-  }
   if (contextSummary?.trim()) {
     parts.push(`Conversation summary:\n${contextSummary.trim()}`);
   }
-  if (messages.length > 0) {
-    const conversationText = messages
+  // The client includes the current prompt as the last history entry; skip it so it is not sent twice.
+  const history = [...messages];
+  const lastMessage = history[history.length - 1];
+  if (lastMessage?.sender === 'user' && lastMessage.text === prompt) {
+    history.pop();
+  }
+  if (history.length > 0) {
+    const conversationText = history
       .map((message) => `${message.sender === 'user' ? 'User' : 'Assistant'}: ${message.text}`)
       .join('\n');
     parts.push(conversationText);
