@@ -669,7 +669,8 @@ function registerShutdownHandlers(httpServer: any, wss: WebSocketServer) {
 async function startServer() {
   // Initialize components and start servers
   const app = express();
-  app.use(express.json());
+  // Above the 100kb default so long programs plus chat history are not rejected with 413.
+  app.use(express.json({ limit: '1mb' }));
   registerAIRoutes(app, serverConfig, createGeminiClient());
   startLlamaServer(serverConfig.localAiPort, serverConfig.localAiContextSize);
   await startHttpAndWs(app);

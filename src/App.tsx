@@ -13,6 +13,21 @@ import { useGlobalTerminal, TerminalMessage } from './services/webhooks';
 
 // Keeps long-running/looping programs from growing the terminal (and its re-render cost) without bound.
 const MAX_TERMINAL_LINES = 2000;
+// Safety cap on what is sent to the AI; errors are almost always at the end of the log.
+const MAX_AI_LOG_LINES = 200;
+// Status lines written when a Run/Debug starts; "Explain" sends only what follows the latest one.
+const RUN_START_MARKER = 'Starting execution via WebSocket...';
+const DEBUG_START_MARKER = 'Spawning GDB Environment (-g -O0)...';
+
+function getLastRunLogs(logs: string[]): string[] {
+  for (let i = logs.length - 1; i >= 0; i--) {
+    if (logs[i].endsWith(RUN_START_MARKER) || logs[i].endsWith(DEBUG_START_MARKER)) {
+      return logs.slice(i);
+    }
+  }
+  // No run in the (trimmed) history: fall back to the whole log.
+  return logs;
+}
 
 function downloadBlob(content: string, type: string, filename: string) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -91,7 +106,7 @@ function Flow() {
   }, []);
 
   const handleAskAI = useCallback(() => {
-    const fullLogString = terminalLogs.join("\n");
+    const fullLogString = getLastRunLogs(terminalLogs).slice(-MAX_AI_LOG_LINES).join("\n");
     setActiveErrorLog(fullLogString);
     setShowChat(true);
   }, [terminalLogs]);
@@ -297,7 +312,7 @@ function Flow() {
     setIsRunning(true);
     setHasError(false);
     setActiveErrorLog("");
-    addTerminalLog("Status", `[${getTimestamp()}] Starting execution via WebSocket...`);
+    addTerminalLog("Status", `[${getTimestamp()}] ${RUN_START_MARKER}`);
 
     runCode(generatedCode);
   }, [generatedCode, runCode, addTerminalLog]);
@@ -331,7 +346,7 @@ function Flow() {
     setIsDebugMode(true);
     setHasError(false);
     setActiveErrorLog("");
-    addTerminalLog("Status", `[${getTimestamp()}] Spawning GDB Environment (-g -O0)...`);
+    addTerminalLog("Status", `[${getTimestamp()}] ${DEBUG_START_MARKER}`);
 
     setIsCurrentlyDebugging(true);
     startDebug(generatedCode);
