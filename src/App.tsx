@@ -11,6 +11,21 @@ import { CodePreview } from './components/GeneratedCodePanel';
 import { SettingsDialog } from './components/SettingsDialog';
 import { useGlobalTerminal, TerminalMessage } from './services/webhooks';
 
+// Keeps long-running/looping programs from growing the terminal (and its re-render cost) without bound.
+const MAX_TERMINAL_LINES = 2000;
+
+function downloadBlob(content: string, type: string, filename: string) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const element = document.createElement('a');
+  element.href = url;
+  element.download = filename;
+  document.body.appendChild(element);
+  element.click();
+  document.body.removeChild(element);
+  // Release the blob once the download has been handed off.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 // --- Main Component ---
 
 function Flow() {
@@ -61,7 +76,6 @@ function Flow() {
   const [currentDebugLine, setCurrentDebugLine] = useState<number | null>(null);
   const [hasError, setHasError] = useState(false);
   const [activeErrorLog, setActiveErrorLog] = useState('');
-  const [isWsConnected, setWsConnected] = useState(false);
 
   // Chat / import modal state
   const [showChat, setShowChat] = useState(false);
@@ -85,13 +99,7 @@ function Flow() {
   const saveProject = useCallback(() => {
     const json = flowActionsRef.current?.exportProject();
     if (json) {
-      const element = document.createElement('a');
-      const file = new Blob([json], { type: 'application/json' });
-      element.href = URL.createObjectURL(file);
-      element.download = 'project.seec';
-      document.body.appendChild(element);
-      element.click();
-      document.body.removeChild(element);
+      downloadBlob(json, 'application/json', 'project.seec');
     }
   }, []);
 
@@ -115,9 +123,12 @@ function Flow() {
   }, []);
 
   const copyToClipboard = useCallback(() => {
-    navigator.clipboard.writeText(generatedCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    navigator.clipboard.writeText(generatedCode).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch((error) => {
+      console.error('Failed to copy code:', error);
+    });
   }, [generatedCode]);
 
   const reloadCodeToNodes = useCallback(() => {
@@ -151,13 +162,7 @@ function Flow() {
         }
 
         // Compilation succeeded; proceed to download source file
-        const element = document.createElement('a');
-        const file = new Blob([generatedCode], { type: 'text/plain' });
-        element.href = URL.createObjectURL(file);
-        element.download = 'program.c';
-        document.body.appendChild(element);
-        element.click();
-        document.body.removeChild(element);
+        downloadBlob(generatedCode, 'text/plain', 'program.c');
         addTerminalLog('Status', `[${getTimestamp()}] Compilation OK — source downloaded.`);
       } catch (err) {
         addTerminalLog('Error', `[${getTimestamp()}] Network or compile error: ${err instanceof Error ? err.message : String(err)}`);
@@ -194,10 +199,11 @@ function Flow() {
     setTerminalLogs(prev => {
       // If empty logs array, initialize with prefix on all lines so styling applies
       if (prev.length === 0) {
-        return segments.map(seg => `${prefix}${seg}`);
+        return segments.map(seg => `${prefix}${seg}`).slice(-MAX_TERMINAL_LINES);
       }
 
-      const next = [...prev];
+      // Start from at most MAX_TERMINAL_LINES of history so the copy stays bounded.
+      const next = prev.length > MAX_TERMINAL_LINES ? prev.slice(-MAX_TERMINAL_LINES) : [...prev];
 
       if (isContinuousOutput) {
         // 1. Append the first segment to the existing output line
@@ -214,7 +220,7 @@ function Flow() {
         });
       }
 
-      return next;
+      return next.length > MAX_TERMINAL_LINES ? next.slice(-MAX_TERMINAL_LINES) : next;
   });
 
   lastLogTypeRef.current = type;
@@ -237,7 +243,7 @@ function Flow() {
     if (event === 'Error') {
       addTerminalLog('Error', text);
       if (
-        /Compilation error|Compiler error|Internal error|Debug error|GDB runtime error|No active debug session running/i.test(text)
+        /Compilation error|Compiler error|Internal error|Debug error|GDB runtime error|No active debug session running|(GCC|GDB) not found/i.test(text)
       ) {
         resetExecutionState();
       }
@@ -278,11 +284,7 @@ function Flow() {
   }, [addTerminalLog, resetExecutionState]);
 
   // Initialize WebSocket connection
-  const { runCode, sendInput, stopExecution, startDebug, debugStepOver, debugStepInto, debugStepOut, isConnected } = useGlobalTerminal(handleTerminalMessage);
-
-  React.useEffect(() => {
-    setWsConnected(isConnected);
-  }, [isConnected]);
+  const { runCode, sendInput, stopExecution, startDebug, debugStep } = useGlobalTerminal(handleTerminalMessage);
 
   const handleRun = useCallback(async (e?: React.MouseEvent) => {
     if (e) { e.preventDefault(); e.stopPropagation(); }
@@ -335,26 +337,13 @@ function Flow() {
     startDebug(generatedCode);
   }, [generatedCode, startDebug, addTerminalLog]);
 
-  const handleStepOver = useCallback(() => {
-    if (isDebugWaitingForInput) {
-      return;
-    }
-    debugStepOver();
-  }, [debugStepOver, isDebugWaitingForInput]);
-
-  const handleStepInto = useCallback(() => {
-    if (isDebugWaitingForInput) {
-      return;
-    }
-    debugStepInto();
-  }, [debugStepInto, isDebugWaitingForInput]);
-
-  const handleStepOut = useCallback(() => {
-    if (isDebugWaitingForInput) {
-      return;
-    }
-    debugStepOut();
-  }, [debugStepOut, isDebugWaitingForInput]);
+  // Stepping is blocked while the program waits for stdin.
+  const [handleStepOver, handleStepInto, handleStepOut] = React.useMemo(
+    () => (['OVER', 'INTO', 'OUT'] as const).map((mode) => () => {
+      if (!isDebugWaitingForInput) debugStep(mode);
+    }),
+    [debugStep, isDebugWaitingForInput]
+  );
 
   const handleStopDebug = useCallback(() => {
     stopExecution();

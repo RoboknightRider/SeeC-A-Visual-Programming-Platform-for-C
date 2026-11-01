@@ -34,6 +34,7 @@ export function generateCCode(nodes: Node[], edges: Edge[]): string {
   // 2. Global Function Definitions (excluding main)
   const functionDefs = nodes.filter(n => n.data.type === 'function-def');
   const visited = new Set<string>();
+  const nodeById = new Map(nodes.map(n => [n.id, n] as const));
 
   /**
    * Recursively traverses the flow starting from a node.
@@ -46,7 +47,7 @@ export function generateCCode(nodes: Node[], edges: Edge[]): string {
     if (visited.has(currentId)) return '';
     visited.add(currentId);
 
-    const node = nodes.find(n => n.id === currentId);
+    const node = nodeById.get(currentId);
     if (!node) return '';
 
     const data = node.data as any;
@@ -55,22 +56,24 @@ export function generateCCode(nodes: Node[], edges: Edge[]): string {
 
     /**
      * Retrieves the value of a field, either from the node data or from a connected expression node.
+     * `resolving` tracks the expression chain so cyclic field connections cannot recurse forever.
      */
-    const getFieldValue = (targetNode: Node, fieldKey: string): string => {
+    const getFieldValue = (targetNode: Node, fieldKey: string, resolving: Set<string> = new Set()): string => {
       const fieldEdge = edges.find(e => e.target === targetNode.id && e.targetHandle === `field:${fieldKey}`);
-      if (fieldEdge) {
-        const sourceNode = nodes.find(n => n.id === fieldEdge.source);
+      if (fieldEdge && !resolving.has(fieldEdge.source)) {
+        const sourceNode = nodeById.get(fieldEdge.source);
         const sourceRegistry = sourceNode ? NODE_REGISTRY[sourceNode.data.type as string] : null;
-        
-        if (sourceRegistry?.toExpression) {
+
+        if (sourceNode && sourceRegistry?.toExpression) {
+          const chain = new Set(resolving).add(targetNode.id).add(sourceNode.id);
           return sourceRegistry.toExpression({
-            node: sourceNode!,
+            node: sourceNode,
             nodes,
             edges,
             visited: new Set(),
             indentLevel: 0,
             traverse: () => '',
-            getFieldValue: (key: string) => getFieldValue(sourceNode!, key)
+            getFieldValue: (key: string) => getFieldValue(sourceNode, key, chain)
           });
         }
       }
@@ -120,12 +123,12 @@ export function generateCCode(nodes: Node[], edges: Edge[]): string {
 
   code += 'int main() {\n';
   const startEdge = edges.find(e => e.source === mainNode.id);
-  if (startEdge) {
-    code += traverse(startEdge.target, 1);
-  }
+  const mainBody = startEdge ? traverse(startEdge.target, 1) : '';
+  code += mainBody;
 
-  // Ensure main returns 0 if no return statement was explicitly added
-  if (!code.includes('return')) {
+  // Ensure main returns 0 if its own body has no return statement
+  // (returns inside other function definitions must not suppress this).
+  if (!/\breturn\b/.test(mainBody)) {
     code += '    return 0;\n';
   }
   code += '}\n';

@@ -20,276 +20,13 @@ import { X, Trash2, Layout, Copy, Clipboard, Undo2, Redo2, Map as MapIcon, EyeOf
 import { BaseNode, NODE_REGISTRY, NodeData } from './Nodes';
 import { generateCCode } from '../services/codeGenerator';
 import { parseCodeToNodes } from '../services/codeParser';
-import dagre from 'dagre';
-
-const GRID_SIZE = 5;
-
-const snapToGrid = (val: number) => Math.round(val / GRID_SIZE) * GRID_SIZE;
-
-const LAYOUT_CONFIG = {
-  defaultNodeWidth: GRID_SIZE * 13,
-  defaultNodeHeight: GRID_SIZE * 8,
-  startX: GRID_SIZE * 3,         // 3 grid units (3 * 20)
-  startY: GRID_SIZE * 3,         // 3 grid units (3 * 20)
-  minIndentStep: GRID_SIZE * 4,  // 4 grid units (4 * 20)
-  maxIndentStep: GRID_SIZE * 8, // 8 grid units (8 * 20)
-  indentStepFactor: 0.35,
-  minLineGap: GRID_SIZE * 2,     // Uniform vertical gap (2 grid units)
-  sectionGap: GRID_SIZE * 4,     // Extra gap between functions/sections (4 grid units)
-  dagre: {
-    minNodeSep: GRID_SIZE * 2,
-    minRankSep: GRID_SIZE * 2,
-    nodeSepFactor: 0.18,
-    rankSepFactor: 0.5,
-    marginX: GRID_SIZE,
-    marginY: GRID_SIZE,
-  },
-} as const;
-
-const getNodeDataType = (node: Node) => (node.data as unknown as NodeData).type;
-const getRegistryItem = (node: Node) => NODE_REGISTRY[getNodeDataType(node)];
-
-const readNumericSize = (value: unknown) => {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string') {
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-  return undefined;
-};
-
-const getNodeDimensions = (node: Node) => {
-  const measured = (node as any).measured as { width?: number; height?: number } | undefined;
-  const style = node.style as { width?: number | string; height?: number | string } | undefined;
-
-  const width =
-    readNumericSize(measured?.width) ??
-    readNumericSize(node.width) ??
-    readNumericSize(style?.width) ??
-    LAYOUT_CONFIG.defaultNodeWidth;
-
-  const height =
-    readNumericSize(measured?.height) ??
-    readNumericSize(node.height) ??
-    readNumericSize(style?.height) ??
-    LAYOUT_CONFIG.defaultNodeHeight;
-
-  return { width, height };
-};
-
-const getDagreLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => {
-  const dagreGraph = new dagre.graphlib.Graph();
-  dagreGraph.setDefaultEdgeLabel(() => ({}));
-
-  const dims = nodes.map(getNodeDimensions);
-  const avgWidth = dims.length ? dims.reduce((sum, d) => sum + d.width, 0) / dims.length : LAYOUT_CONFIG.defaultNodeWidth;
-  const avgHeight = dims.length ? dims.reduce((sum, d) => sum + d.height, 0) / dims.length : LAYOUT_CONFIG.defaultNodeHeight;
-  
-  const isHorizontal = direction === 'LR';
-  dagreGraph.setGraph({ 
-    rankdir: direction,
-    nodesep: Math.max(LAYOUT_CONFIG.dagre.minNodeSep, Math.round(avgWidth * LAYOUT_CONFIG.dagre.nodeSepFactor)),
-    ranksep: Math.max(LAYOUT_CONFIG.dagre.minRankSep, Math.round(avgHeight * LAYOUT_CONFIG.dagre.rankSepFactor)),
-    marginx: LAYOUT_CONFIG.dagre.marginX,
-    marginy: LAYOUT_CONFIG.dagre.marginY,
-  });
-
-  nodes.forEach((node) => {
-    const { width, height } = getNodeDimensions(node);
-    dagreGraph.setNode(node.id, { width, height });
-  });
-
-  edges.forEach((edge) => {
-    dagreGraph.setEdge(edge.source, edge.target);
-  });
-
-  dagre.layout(dagreGraph);
-
-  return {
-    nodes: nodes.map((node) => {
-      const nodeWithPosition = dagreGraph.node(node.id);
-      const { width, height } = getNodeDimensions(node);
-      return {
-        ...node,
-        targetPosition: isHorizontal ? 'left' : 'top',
-        sourcePosition: isHorizontal ? 'right' : 'bottom',
-        position: {
-          x: snapToGrid(nodeWithPosition.x - width / 2),
-          y: snapToGrid(nodeWithPosition.y - height / 2),
-        },
-      };
-    }),
-    edges,
-  };
-};
-
-const getCodeLikeLayoutedElements = (nodes: Node[], edges: Edge[]) => {
-  const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const nextBySource = new Map<string, string>();
-  const bodyBySource = new Map<string, string>();
-  const incomingCount = new Map<string, number>(nodes.map((node) => [node.id, 0]));
-
-  edges.forEach((edge) => {
-    incomingCount.set(edge.target, (incomingCount.get(edge.target) || 0) + 1);
-
-    if (edge.sourceHandle === 'body') {
-      bodyBySource.set(edge.source, edge.target);
-      return;
-    }
-
-    if ((edge.sourceHandle === 'next' || !edge.sourceHandle) && !nextBySource.has(edge.source)) {
-      nextBySource.set(edge.source, edge.target);
-    }
-  });
-
-  const getRootSortWeight = (node: Node) => {
-    const registryItem = getRegistryItem(node);
-    if (registryItem?.hidePrevHandle) return 0;
-    if (registryItem?.category === 'Structure') return 1;
-    if (registryItem?.category === 'Control') return 2;
-    return 3;
-  };
-
-  const sortedNodes = [...nodes].sort((a, b) => {
-    const aPriority = getRootSortWeight(a);
-    const bPriority = getRootSortWeight(b);
-
-    if (aPriority !== bPriority) return aPriority - bPriority;
-    if (a.position.y !== b.position.y) return a.position.y - b.position.y;
-    if (a.position.x !== b.position.x) return a.position.x - b.position.x;
-    return a.id.localeCompare(b.id);
-  });
-
-  const rootIds = sortedNodes
-    .filter((node) => (incomingCount.get(node.id) || 0) === 0)
-    .map((node) => node.id);
-
-  const preferredRoots = sortedNodes
-    .filter((node) => getRegistryItem(node)?.hidePrevHandle)
-    .map((node) => node.id);
-
-  const orderedRoots = Array.from(new Set([...preferredRoots, ...rootIds]));
-  
-  const placed = new Set<string>();
-  const blockTrees: Array<Array<{ id: string; indentLevel: number }>> = [];
-
-  const placeBlock = (nodeId: string, indentLevel: number, currentTree: Array<{ id: string; indentLevel: number }>) => {
-    if (placed.has(nodeId)) return;
-
-    const node = nodeById.get(nodeId);
-    if (!node) return;
-
-    currentTree.push({ id: nodeId, indentLevel });
-    placed.add(nodeId);
-
-    const registry = getRegistryItem(node);
-    const bodyTarget = bodyBySource.get(nodeId);
-
-    if (bodyTarget) {
-      const isContainer = registry?.category === 'Structure' || registry?.category === 'Control' || registry?.hidePrevHandle;
-      const bodyIndentDelta = isContainer ? 1 : 0;
-      placeBlock(bodyTarget, indentLevel + bodyIndentDelta, currentTree);
-    }
-
-    const nextTarget = nextBySource.get(nodeId);
-    if (nextTarget) {
-      placeBlock(nextTarget, indentLevel, currentTree);
-    }
-  };
-
-  orderedRoots.forEach((rootId) => {
-    if (placed.has(rootId)) return;
-    const tree: Array<{ id: string; indentLevel: number }> = [];
-    placeBlock(rootId, 0, tree);
-    if (tree.length > 0) {
-      blockTrees.push(tree);
-    }
-  });
-
-  sortedNodes.forEach((node) => {
-    if (placed.has(node.id)) return;
-    const tree: Array<{ id: string; indentLevel: number }> = [];
-    placeBlock(node.id, 0, tree);
-    if (tree.length > 0) {
-      blockTrees.push(tree);
-    }
-  });
-
-  const allPlacements = blockTrees.flat();
-  const avgPlacementWidth = allPlacements.length
-    ? allPlacements.reduce((sum, p) => {
-        const node = nodeById.get(p.id);
-        return sum + (node ? getNodeDimensions(node).width : LAYOUT_CONFIG.defaultNodeWidth);
-      }, 0) / allPlacements.length
-    : LAYOUT_CONFIG.defaultNodeWidth;
-
-  const rawIndentStep = Math.max(
-    LAYOUT_CONFIG.minIndentStep,
-    Math.min(LAYOUT_CONFIG.maxIndentStep, Math.round(avgPlacementWidth * LAYOUT_CONFIG.indentStepFactor))
-  );
-  const indentStep = snapToGrid(rawIndentStep);
-
-  const maxIndent = allPlacements.reduce((max, p) => Math.max(max, p.indentLevel), 0);
-  const xByIndent = new Map<number, number>();
-  xByIndent.set(0, LAYOUT_CONFIG.startX);
-  for (let i = 1; i <= maxIndent; i += 1) {
-    xByIndent.set(i, LAYOUT_CONFIG.startX + i * indentStep);
-  }
-
-  const positions = new Map<string, { x: number; y: number }>();
-  let currentY = LAYOUT_CONFIG.startY;
-
-  blockTrees.forEach((tree, treeIndex) => {
-    tree.forEach(({ id, indentLevel }) => {
-      const node = nodeById.get(id);
-      if (!node) return;
-
-      const { height } = getNodeDimensions(node);
-
-      // Snap the measured height UP to the nearest grid step
-      const gridAlignedHeight = snapToGrid(Math.ceil(height));
-
-      positions.set(id, {
-        x: xByIndent.get(indentLevel) || LAYOUT_CONFIG.startX,
-        y: currentY,
-      });
-
-      // Advance currentY strictly on grid units
-      currentY += gridAlignedHeight + LAYOUT_CONFIG.minLineGap;
-    });
-
-    if (treeIndex < blockTrees.length - 1) {
-      currentY += LAYOUT_CONFIG.sectionGap;
-    }
-  });
-
-  return {
-    nodes: nodes.map((node) => ({
-      ...node,
-      targetPosition: 'top',
-      sourcePosition: 'bottom',
-      position: positions.get(node.id) || node.position,
-    })),
-    edges,
-  };
-};
-
-const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => {
-  if (direction === 'TB' || !direction) {
-    return getCodeLikeLayoutedElements(nodes, edges);
-  }
-
-  return getDagreLayoutedElements(nodes, edges, direction);
-};
+import { GRID_SIZE, layoutCodeLike, snapToGrid } from '../services/flowLayout';
 
 const initialNodes: Node[] = [];
 const initialEdges: Edge[] = [];
 
 export type FlowCanvasActions = {
   addNode: (type: string) => void;
-  layout: () => void;
-  undo: () => void;
-  redo: () => void;
   exportProject: () => string;
   importProject: (json: string) => void;
   importCode: (code: string) => void;
@@ -621,17 +358,13 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editin
     [editingDisabled, screenToFlowPosition, addNode]
   );
 
-  const handleLayout = useCallback((direction?: string, forceNodes?: Node[], forceEdges?: Edge[]) => {
+  const handleLayout = useCallback(() => {
     if (editingDisabled) return;
     recordHistory();
-    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-      forceNodes || getNodes(),
-      forceEdges || getEdges(),
-      direction
-    );
-    setNodes(layoutedNodes as unknown as any[]);
+    const { nodes: layoutedNodes, edges: layoutedEdges } = layoutCodeLike(getNodes(), getEdges());
+    setNodes(layoutedNodes);
     setEdges([...layoutedEdges]);
-    triggerCodeGeneration(layoutedNodes as unknown as Node[], layoutedEdges as unknown as Edge[]);
+    triggerCodeGeneration(layoutedNodes, layoutedEdges);
     setTimeout(() => fitView({ padding: 0.2, duration: 800 }), 50);
   }, [editingDisabled, fitView, getEdges, getNodes, recordHistory, setEdges, setNodes, triggerCodeGeneration]);
 
@@ -666,9 +399,6 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editin
   useEffect(() => {
     const actions: FlowCanvasActions = {
       addNode,
-      layout: handleLayout,
-      undo,
-      redo,
       exportProject: () => {
         const flow = {
           nodes: getNodes(),
@@ -721,7 +451,7 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editin
     return () => {
       registerActions?.(null);
     };
-  }, [addNode, editingDisabled, fitView, getEdges, getNodes, handleLayout, redo, recordHistory, registerActions, setEdges, setNodes, triggerCodeGeneration, undo]);
+  }, [addNode, editingDisabled, fitView, getEdges, getNodes, handleLayout, recordHistory, registerActions, setEdges, setNodes, triggerCodeGeneration]);
 
   const hasAutoLayoutedRef = useRef(false);
   useEffect(() => {

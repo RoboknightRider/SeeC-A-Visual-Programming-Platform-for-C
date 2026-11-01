@@ -77,7 +77,6 @@ interface NodeWrapperProps {
 }
 
 const NodeWrapper = React.memo(({ 
-  id, 
   data, 
   selected, 
   children, 
