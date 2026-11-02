@@ -3,7 +3,7 @@ import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { cn } from '../lib/utils';
 import { 
   Terminal, Hash, Play, Variable, Calculator, ArrowRight, 
-  GitBranch, Repeat, LogOut, Layers, Box,
+  GitBranch, Repeat, LogOut, Layers, Box, Globe,
 } from 'lucide-react';
 
 import { NodeData, NodeField } from './Nodes';
@@ -27,7 +27,9 @@ type IconComponent = React.ComponentType<{ className?: string }>;
 
 export const icons: Record<string, IconComponent> = {
   include: Hash,
+  define: Hash,
   main: Play,
+  globals: Globe,
   variable: Variable,
   literal: Variable,
   array: Layers,
@@ -118,7 +120,7 @@ const NodeWrapper = React.memo(({
           {!hideNextHandle && (
             <div className="absolute bottom-0 left-[20px] translate-y-1/2 handle-wrapper">
               <Handle type="source" position={Position.Bottom} id="next" className={cn("!border-zinc-900 !w-3 !h-3", color === 'blue' ? "!bg-blue-500" : "!bg-emerald-500")} />
-              <HandleLabel position="bottom">{data.type === 'function-def' ? 'Body' : 'Next'}</HandleLabel>
+              <HandleLabel position="bottom">{data.type === 'function-def' ? 'Body' : data.type === 'globals' ? 'Declarations' : 'Next'}</HandleLabel>
             </div>
           )}
         </>
@@ -173,17 +175,25 @@ interface TypeSelectorProps {
   onChange: (value: string) => void;
 }
 
-const TypeSelector = React.memo(({ value, onChange }: TypeSelectorProps) => (
-  <select 
-    value={value || 'int'} 
-    onChange={(e) => onChange(e.target.value)}
-    className={FIELD_CONTROL_CLASS}
-  >
-    {['int', 'float', 'char', 'double', 'void', 'long'].map(t => (
-      <option key={t} value={t}>{t}</option>
-    ))}
-  </select>
-));
+const BASIC_TYPES = ['int', 'float', 'char', 'double', 'void', 'long'];
+
+// Imported code can carry other types (`Point`, `static int`, `unsigned int`); list the current one
+// too, otherwise the select silently displays `int` while the code uses something else.
+const TypeSelector = React.memo(({ value, onChange }: TypeSelectorProps) => {
+  const current = value || 'int';
+  const options = BASIC_TYPES.includes(current) ? BASIC_TYPES : [current, ...BASIC_TYPES];
+  return (
+    <select
+      value={current}
+      onChange={(e) => onChange(e.target.value)}
+      className={FIELD_CONTROL_CLASS}
+    >
+      {options.map(t => (
+        <option key={t} value={t}>{t}</option>
+      ))}
+    </select>
+  );
+});
 
 export const GenericNode = React.memo((props: any) => {
   const { data, registryItem, id } = props;

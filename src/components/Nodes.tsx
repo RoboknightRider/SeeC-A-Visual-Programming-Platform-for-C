@@ -8,6 +8,7 @@ export interface NodeData {
   label: string;
   type: NodeType;
   value?: string;
+  macroName?: string; // For #define
   varName?: string;
   varType?: 'int' | 'float' | 'char' | 'double' | 'void' | 'long';
   operator?: '+' | '-' | '*' | '/' | '%' | '==' | '!=' | '<' | '>' | '<=' | '>=' | '&&' | '||';
@@ -38,22 +39,9 @@ const traverseHandle = ({ node, edges, traverse }: NodeContext, handle: 'body' |
   return edge ? traverse(edge.target, indentLevel) : '';
 };
 
-// Builds a node's statement form from its expression form: `<indent><expression>;`.
-const asStatement = (toExpression: (ctx: NodeContext) => string) =>
-  (ctx: NodeContext) => `${getIndent(ctx.indentLevel)}${toExpression(ctx)};\n`;
-
-const functionCallExpression = ({ node, getFieldValue }: NodeContext) =>
-  `${(node.data as unknown as NodeData).varName || 'func'}(${getFieldValue('params') || ''})`;
-
-const freeExpression = ({ node, getFieldValue }: NodeContext) =>
-  `free(${getFieldValue('varName') || (node.data as unknown as NodeData).varName || 'items'})`;
-
-const arithmeticExpression = ({ node, getFieldValue }: NodeContext) => {
-  const data = node.data as unknown as NodeData;
-  return `${data.varName || 'x'} ${data.operator || '+'}= ${getFieldValue('value') || '0'}`;
-};
-
-const literalExpression = ({ getFieldValue }: NodeContext) => getFieldValue('value');
+// Emits a single-line statement at the current indentation.
+const statement = (indentLevel: number, text: string) => `${getIndent(indentLevel)}${text};
+`;
 
 // Emits a body block for if / else-if, keeping a following else on the same line as the closing brace.
 const closeConditionalBlock = (ctx: NodeContext, header: string) => {
@@ -72,7 +60,6 @@ export interface NodeField {
   placeholder?: string;
   options?: string[];
   className?: string;
-  connectable?: boolean;
 }
 
 export interface NodeRegistryItem {
@@ -93,7 +80,6 @@ export interface NodeRegistryItem {
   tailSyntax?: string;
   parserBodyHandle?: 'body' | 'next';
   toCode: (ctx: NodeContext) => string;
-  toExpression?: (ctx: NodeContext) => string;
 }
 
 // Fallback BaseNode for backward compatibility or generic use
@@ -129,6 +115,25 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       return `#include <${data.value || 'stdio.h'}>\n`;
     },
   },
+  define: {
+    type: 'define',
+    icon: icons.define,
+    color: 'blue',
+    label: 'Define',
+    category: 'Structure',
+    hidePrevHandle: true,
+    hideNextHandle: true,
+    defaultData: { macroName: 'SIZE', value: '10' },
+    fields: [
+      { key: 'macroName', label: 'Macro', type: 'text', placeholder: 'SIZE or SQUARE(x)' },
+      { key: 'value', label: 'Value', type: 'text', placeholder: '10' }
+    ],
+    // Parsed directly from `#define` lines in codeParser; emitted after includes by the generator.
+    toCode: ({ node }) => {
+      const data = node.data as unknown as NodeData;
+      return `#define ${data.macroName || 'SIZE'} ${data.value || ''}`.trimEnd() + '\n';
+    },
+  },
   main: {
     type: 'main',
     icon: icons.main,
@@ -146,6 +151,17 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     parserBodyHandle: 'next',
     toCode: () => '',
   },
+  globals: {
+    type: 'globals',
+    icon: icons.globals,
+    color: 'blue',
+    label: 'Global Scope',
+    category: 'Structure',
+    hidePrevHandle: true,
+    defaultData: {},
+    // Starts a chain of file-scope declarations; the generator emits them before all functions.
+    toCode: () => '',
+  },
   if: {
     type: 'if',
     icon: icons.if,
@@ -154,7 +170,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     category: 'Control',
     defaultData: { condition: 'x > 0' },
     fields: [
-      { key: 'condition', label: 'Condition', type: 'text', placeholder: 'x > 0', connectable: true }
+      { key: 'condition', label: 'Condition', type: 'text', placeholder: 'x > 0' }
     ],
     syntax: 'if ({{condition}}) {',
     body: true,
@@ -169,7 +185,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     category: 'Control',
     defaultData: { condition: 'x < 0' },
     fields: [
-      { key: 'condition', label: 'Condition', type: 'text', placeholder: 'x < 0', connectable: true }
+      { key: 'condition', label: 'Condition', type: 'text', placeholder: 'x < 0' }
     ],
     syntax: 'else if ({{condition}}) {',
     strictPrev: ['if', 'else-if'],
@@ -196,7 +212,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     category: 'Control',
     defaultData: { condition: 'x < 10' },
     fields: [
-      { key: 'condition', label: 'Condition', type: 'text', placeholder: 'x < 10', connectable: true }
+      { key: 'condition', label: 'Condition', type: 'text', placeholder: 'x < 10' }
     ],
     syntax: 'while ({{condition}}) {',
     body: true,
@@ -214,7 +230,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     category: 'Control',
     defaultData: { condition: 'x < 10' },
     fields: [
-      { key: 'condition', label: 'Condition', type: 'text', placeholder: 'x < 10', connectable: true }
+      { key: 'condition', label: 'Condition', type: 'text', placeholder: 'x < 10' }
     ],
     syntax: 'do {',
     tailSyntax: 'while ({{condition}});',
@@ -321,8 +337,8 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     layout: 'horizontal',
     defaultData: { value: '"Hello World\\n"', params: '' },
     fields: [
-      { key: 'value', label: 'Format String', type: 'text', placeholder: '"%d"', connectable: true },
-      { key: 'params', label: 'Arguments', type: 'text', placeholder: 'x, y', connectable: true }
+      { key: 'value', label: 'Format String', type: 'text', placeholder: '"%d"' },
+      { key: 'params', label: 'Arguments', type: 'text', placeholder: 'x, y' }
     ],
     syntax: [
       'printf({{value}}, {{params}});',
@@ -347,8 +363,8 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     layout: 'horizontal',
     defaultData: { value: '"%d"', params: '&x' },
     fields: [
-      { key: 'value', label: 'Format String', type: 'text', placeholder: '"%d"', connectable: true },
-      { key: 'params', label: 'Arguments', type: 'text', placeholder: '&x, &y', connectable: true }
+      { key: 'value', label: 'Format String', type: 'text', placeholder: '"%d"' },
+      { key: 'params', label: 'Arguments', type: 'text', placeholder: '&x, &y' }
     ],
     syntax: 'scanf({{value}}, {{params}});',
     toCode: ({ indentLevel, getFieldValue }) => {
@@ -398,14 +414,14 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     defaultData: { varName: 'myFunc', params: '' },
     fields: [
       { key: 'varName', label: 'Name', type: 'text', placeholder: 'myFunc' },
-      { key: 'params', label: 'Arguments', type: 'text', placeholder: '5, x', connectable: true }
+      { key: 'params', label: 'Arguments', type: 'text', placeholder: '5, x' }
     ],
     syntax: [
       '{{varName}}({{params}});',
       '{{varName}}();'
     ],
-    toCode: asStatement(functionCallExpression),
-    toExpression: functionCallExpression
+    toCode: ({ node, indentLevel, getFieldValue }) =>
+      statement(indentLevel, `${(node.data as unknown as NodeData).varName || 'func'}(${getFieldValue('params') || ''})`)
   },
   malloc: {
     type: 'malloc',
@@ -418,7 +434,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     fields: [
       { key: 'varName', label: 'Pointer', type: 'text', placeholder: 'items' },
       { key: 'varType', label: 'Element Type', type: 'type-selector' },
-      { key: 'size', label: 'Count', type: 'text', placeholder: '10', connectable: true }
+      { key: 'size', label: 'Count', type: 'text', placeholder: '10' }
     ],
     syntax: '{{varType}} *{{varName}} = malloc(({{size}}) * sizeof({{varType}}));',
     toCode: ({ node, indentLevel, getFieldValue }) => {
@@ -427,12 +443,6 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       const varType = data.varType || 'int';
       const size = getFieldValue('size') || '10';
       return `${getIndent(indentLevel)}${varType} *${varName} = malloc((${size}) * sizeof(${varType}));\n`;
-    },
-    toExpression: ({ node, getFieldValue }) => {
-      const data = node.data as unknown as NodeData;
-      const varType = data.varType || 'int';
-      const size = getFieldValue('size') || '10';
-      return `malloc((${size}) * sizeof(${varType}))`;
     }
   },
   realloc: {
@@ -446,7 +456,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     fields: [
       { key: 'varName', label: 'Pointer', type: 'text', placeholder: 'items' },
       { key: 'varType', label: 'Element Type', type: 'type-selector' },
-      { key: 'size', label: 'New Count', type: 'text', placeholder: '20', connectable: true }
+      { key: 'size', label: 'New Count', type: 'text', placeholder: '20' }
     ],
     syntax: '{{varName}} = realloc({{varName}}, ({{size}}) * sizeof({{varType}}));',
     toCode: ({ node, indentLevel, getFieldValue }) => {
@@ -455,13 +465,6 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       const varType = data.varType || 'int';
       const size = getFieldValue('size') || '20';
       return `${getIndent(indentLevel)}${varName} = realloc(${varName}, (${size}) * sizeof(${varType}));\n`;
-    },
-    toExpression: ({ node, getFieldValue }) => {
-      const data = node.data as unknown as NodeData;
-      const varName = data.varName || 'items';
-      const varType = data.varType || 'int';
-      const size = getFieldValue('size') || '20';
-      return `realloc(${varName}, (${size}) * sizeof(${varType}))`;
     }
   },
   free: {
@@ -473,11 +476,11 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     layout: 'horizontal',
     defaultData: { varName: 'items' },
     fields: [
-      { key: 'varName', label: 'Pointer', type: 'text', placeholder: 'items', connectable: true }
+      { key: 'varName', label: 'Pointer', type: 'text', placeholder: 'items' }
     ],
     syntax: 'free({{varName}});',
-    toCode: asStatement(freeExpression),
-    toExpression: freeExpression
+    toCode: ({ node, indentLevel, getFieldValue }) =>
+      statement(indentLevel, `free(${getFieldValue('varName') || (node.data as unknown as NodeData).varName || 'items'})`)
   },
   return: {
     type: 'return',
@@ -488,7 +491,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     layout: 'horizontal',
     defaultData: { value: '0' },
     fields: [
-      { key: 'value', label: 'Value', type: 'text', placeholder: '0', connectable: true }
+      { key: 'value', label: 'Value', type: 'text', placeholder: '0' }
     ],
     syntax: 'return {{value}};',
     toCode: ({ indentLevel, getFieldValue }) => {
@@ -507,7 +510,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     fields: [
       { key: 'varType', label: 'Type', type: 'type-selector' },
       { key: 'varName', label: 'Name', type: 'text', placeholder: 'x' },
-      { key: 'value', label: 'Value', type: 'text', placeholder: '', connectable: true }
+      { key: 'value', label: 'Value', type: 'text', placeholder: '' }
     ],
     syntax: [
       '{{varType}} {{varName}} = {{value}};',
@@ -528,10 +531,6 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       } else {
         return `${indent}${varType} ${varName};\n`;
       }
-    },
-    toExpression: ({ node }) => {
-      const data = node.data as unknown as NodeData;
-      return data.varName || 'x';
     }
   },
   array: {
@@ -579,7 +578,7 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     defaultData: { varName: 'x', value: '10' },
     fields: [
       { key: 'varName', label: 'Variable', type: 'text', placeholder: 'x' },
-      { key: 'value', label: 'Value', type: 'text', placeholder: '10', connectable: true }
+      { key: 'value', label: 'Value', type: 'text', placeholder: '10' }
     ],
     syntax: '{{varName}} = {{value}};',
     toCode: ({ node, indentLevel, getFieldValue }) => {
@@ -599,14 +598,16 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
     fields: [
       { key: 'varName', label: 'Variable', type: 'text', placeholder: 'x' },
       { key: 'operator', label: 'Op', type: 'select', options: ['+', '-', '*', '/', '%'] },
-      { key: 'value', label: 'Value', type: 'text', placeholder: '1', connectable: true }
+      { key: 'value', label: 'Value', type: 'text', placeholder: '1' }
     ],
     syntax: [
       '{{varName}} {{operator}}= {{value}};',
       '{{varName}}{{operator}}={{value}};'
     ],
-    toCode: asStatement(arithmeticExpression),
-    toExpression: arithmeticExpression
+    toCode: ({ node, indentLevel, getFieldValue }) => {
+      const data = node.data as unknown as NodeData;
+      return statement(indentLevel, `${data.varName || 'x'} ${data.operator || '+'}= ${getFieldValue('value') || '0'}`);
+    }
   },
   comment: {
     type: 'comment',
@@ -634,7 +635,6 @@ export const NODE_REGISTRY: Record<string, NodeRegistryItem> = {
       { key: 'value', label: 'Value', type: 'text', placeholder: '0' }
     ],
     syntax: '{{value}};',
-    toCode: asStatement(literalExpression),
-    toExpression: literalExpression
+    toCode: ({ indentLevel, getFieldValue }) => statement(indentLevel, getFieldValue('value'))
   },
 };

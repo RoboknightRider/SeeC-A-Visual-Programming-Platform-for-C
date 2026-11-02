@@ -15,6 +15,8 @@ interface ParserState {
   nodeCount: number;
 }
 
+const GLOBALS_NODE_ID = 'globals';
+
 export function parseCodeToNodes(code: string): { nodes: Node[], edges: Edge[] } {
   const state: ParserState = {
     nodes: [],
@@ -41,9 +43,48 @@ function parseBlock(block: string, parentId: string | null, parentHandle: string
   let prevHandle = parentHandle;
   let currentY = state.currentY + 150;
 
+  // At file scope, includes/functions/main stand alone (they have no Prev handle) and every
+  // other statement is a global declaration, chained under a single Global Scope node.
+  const isFileScope = parentId === null;
+  let globalTailId: string | null = null;
+
+  const connectToPrevious = (nodeId: string, type: string) => {
+    if (isFileScope) {
+      if (NODE_REGISTRY[type]?.hidePrevHandle) return;
+      if (!globalTailId) {
+        state.nodes.push({
+          id: GLOBALS_NODE_ID,
+          type: 'globals',
+          position: { x: 250, y: currentY },
+          data: { label: NODE_REGISTRY.globals.label, type: 'globals', ...NODE_REGISTRY.globals.defaultData },
+        });
+        globalTailId = GLOBALS_NODE_ID;
+      }
+      state.edges.push({ id: `e-${globalTailId}-${nodeId}`, source: globalTailId, target: nodeId, sourceHandle: 'next', targetHandle: 'prev' });
+      globalTailId = nodeId;
+      return;
+    }
+    if (prevId) {
+      state.edges.push({ id: `e-${prevId}-${nodeId}`, source: prevId, target: nodeId, sourceHandle: prevHandle, targetHandle: 'prev' });
+    }
+  };
+
   while (remaining.length > 0) {
     const nodeId = `node-${state.nodeCount++}`;
     let consumed = 0;
+
+    // 0. Preprocessor directives are line-based: read exactly one (possibly continued) line so a
+    // directive can never swallow the code after it. Unsupported directives are skipped.
+    if (remaining.startsWith('#')) {
+      const directive = consumeDirectiveLine(remaining);
+      const node = createDirectiveNode(directive.text, nodeId, currentY);
+      if (node) {
+        state.nodes.push(node);
+        currentY += 150;
+      }
+      remaining = remaining.substring(directive.consumed).trim();
+      continue;
+    }
 
     // 1. Structured blocks and labels (syntax ending with { or :)
     const blockMatch = matchBlockStart(remaining);
@@ -82,9 +123,7 @@ function parseBlock(block: string, parentId: string | null, parentHandle: string
         }
       });
 
-      if (prevId) {
-        state.edges.push({ id: `e-${prevId}-${parsedNodeId}`, source: prevId, target: parsedNodeId, sourceHandle: prevHandle, targetHandle: 'prev' });
-      }
+      connectToPrevious(parsedNodeId, type);
       
       state.currentY = currentY;
       parseBlock(innerBody, parsedNodeId, resolveParserBodyHandle(type), state);
@@ -134,9 +173,7 @@ function parseBlock(block: string, parentId: string | null, parentHandle: string
           }
         });
 
-        if (prevId) {
-          state.edges.push({ id: `e-${prevId}-${parsedNodeId}`, source: prevId, target: parsedNodeId, sourceHandle: prevHandle, targetHandle: 'prev' });
-        }
+        connectToPrevious(parsedNodeId, type);
 
         state.currentY = currentY;
         parseBlock(bracedBody.body, parsedNodeId, resolveParserBodyHandle(type), state);
@@ -173,9 +210,7 @@ function parseBlock(block: string, parentId: string | null, parentHandle: string
           }
         });
 
-        if (prevId) {
-          state.edges.push({ id: `e-${prevId}-${nodeId}`, source: prevId, target: nodeId, sourceHandle: prevHandle, targetHandle: 'prev' });
-        }
+        connectToPrevious(nodeId, type);
 
         const savedY = state.currentY;
         state.currentY = currentY;
@@ -205,9 +240,7 @@ function parseBlock(block: string, parentId: string | null, parentHandle: string
       const nodeType = node ? (node.data as { type?: string }).type || node.type : undefined;
       if (node && nodeType && nodeType !== 'literal' && !NODE_REGISTRY[nodeType]?.body && !isLabelSyntaxType(nodeType)) {
         state.nodes.push(node);
-        if (prevId) {
-          state.edges.push({ id: `e-${prevId}-${nodeId}`, source: prevId, target: nodeId, sourceHandle: prevHandle, targetHandle: 'prev' });
-        }
+        connectToPrevious(nodeId, nodeType);
         prevId = nodeId;
         prevHandle = 'next';
         currentY += 150;
@@ -218,6 +251,27 @@ function parseBlock(block: string, parentId: string | null, parentHandle: string
 
     // 4. Generic statement scan
     const semiIdx = findStatementEnd(remaining);
+
+    // A block header no node understands (e.g. an unusual function signature) is kept whole as raw
+    // text. Scanning to the next `;` instead would cut through its body and lose all code after it.
+    const braceIdx = remaining.indexOf('{');
+    if (braceIdx !== -1 && (semiIdx === -1 || braceIdx < semiIdx) && remaining.slice(0, braceIdx).trimEnd().endsWith(')')) {
+      const block = consumeBracedBlock(remaining, braceIdx + 1);
+      const rawText = remaining.substring(0, block.consumed).trim();
+      state.nodes.push({
+        id: nodeId,
+        type: 'literal',
+        position: { x: 250, y: currentY },
+        data: { label: NODE_REGISTRY.literal.label, type: 'literal', value: rawText },
+      });
+      connectToPrevious(nodeId, 'literal');
+      prevId = nodeId;
+      prevHandle = 'next';
+      currentY += 150;
+      remaining = remaining.substring(block.consumed).trim();
+      continue;
+    }
+
     if (semiIdx !== -1) {
       const statement = remaining.substring(0, semiIdx).trim();
       consumed = semiIdx + 1;
@@ -225,9 +279,7 @@ function parseBlock(block: string, parentId: string | null, parentHandle: string
       const node = createNodeFromStatement(statement, nodeId, currentY);
       if (node) {
         state.nodes.push(node);
-        if (prevId) {
-          state.edges.push({ id: `e-${prevId}-${nodeId}`, source: prevId, target: nodeId, sourceHandle: prevHandle, targetHandle: 'prev' });
-        }
+        connectToPrevious(nodeId, node.type as string);
         prevId = nodeId;
         prevHandle = 'next';
         currentY += 150;
@@ -327,6 +379,18 @@ function buildTemplateData(keys: string[], match: RegExpMatchArray): Record<stri
   keys.forEach((key, i) => {
     data[key] = (match[i + 1] || '').trim();
   });
+
+  // Placeholders match lazily, so `static int f(...)` or `unsigned int x` split after the first word.
+  // Move a declared name's extra leading words into its type to keep qualifiers and a valid name.
+  if (data.varType !== undefined && /\s/.test(data.varName || '')) {
+    const parts = data.varName.split(/\s+/);
+    let name = parts.pop()!;
+    while (parts.length && /^\*+$/.test(parts[parts.length - 1])) name = parts.pop() + name;
+    if (parts.length) {
+      data.varType = `${data.varType} ${parts.join(' ')}`;
+      data.varName = name;
+    }
+  }
   return data;
 }
 
@@ -408,13 +472,44 @@ function isValidNodeMatch(type: string, data: Record<string, string>): boolean {
       return false;
     }
 
-    // For declaration-like nodes (those exposing a type selector), name fields should be plain identifiers.
-    if (hasTypeSelector && key.toLowerCase().includes('name') && !isLikelyIdentifier(value)) {
+    // For declaration-like nodes (those exposing a type selector), name fields should be plain
+    // identifiers, optionally prefixed with `*` for pointers (`int *p`, `int *makeRange(...)`).
+    if (hasTypeSelector && key.toLowerCase().includes('name') && !isLikelyIdentifier(value.replace(/^(\*\s*)+/, ''))) {
       return false;
     }
   }
 
   return true;
+}
+
+// Reads one preprocessor line, joining backslash-continued lines.
+function consumeDirectiveLine(remaining: string): { text: string, consumed: number } {
+  let end = 0;
+  while (true) {
+    const newlineIdx = remaining.indexOf('\n', end);
+    if (newlineIdx === -1) {
+      end = remaining.length;
+      break;
+    }
+    end = newlineIdx + 1;
+    if (!remaining.substring(0, newlineIdx).trimEnd().endsWith('\\')) break;
+  }
+  return { text: remaining.substring(0, end).replace(/\\\s*\n/g, ' ').trim(), consumed: end };
+}
+
+// `#include <...>` goes through the registry syntax; `#define NAME value` and
+// `#define NAME(args) body` become Define nodes. Other directives return null.
+function createDirectiveNode(text: string, id: string, y: number): Node | null {
+  const define = text.match(/^#\s*define\s+([A-Za-z_]\w*(?:\([^)]*\))?)\s*([\s\S]*)$/);
+  if (define) {
+    return {
+      id,
+      type: 'define',
+      position: { x: 250, y },
+      data: { label: NODE_REGISTRY.define.label, type: 'define', macroName: define[1], value: define[2].trim() },
+    };
+  }
+  return /^#\s*include\b/.test(text) ? createNodeFromStatement(text, id, y) : null;
 }
 
 function isLikelyIdentifier(value: string): boolean {

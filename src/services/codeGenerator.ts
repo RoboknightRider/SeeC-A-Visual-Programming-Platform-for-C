@@ -1,37 +1,39 @@
 import { Edge, Node } from '@xyflow/react';
 import { NODE_REGISTRY } from '../components/Nodes';
 
+// Field values are whatever the user typed into the node.
+const readField = (node: Node, key: string): string => (node.data as any)[key] || '';
+
 /**
  * Generates C source code from a set of React Flow nodes and edges.
- * 
+ *
  * @param nodes Array of React Flow nodes
  * @param edges Array of React Flow edges
  * @returns Generated C code string
  */
 export function generateCCode(nodes: Node[], edges: Edge[]): string {
   let code = '';
-  
-  // 1. Process Includes
-  const includes = nodes.filter(n => n.data.type === 'include');
-  
-  includes.forEach(n => {
-    const registryItem = NODE_REGISTRY['include'];
-    if (registryItem) {
-      code += registryItem.toCode({ 
-        node: n, 
-        nodes, 
-        edges, 
-        visited: new Set(), 
-        indentLevel: 0, 
-        traverse: () => '',
-        getFieldValue: (key: string) => (n.data as any)[key] || ''
-      });
-    }
-  });
-  
-  if (includes.length > 0) code += '\n';
 
-  // 2. Global Function Definitions (excluding main)
+  // 1. Preprocessor: includes first, then macro definitions (each group in canvas order)
+  const preprocessor = [
+    ...nodes.filter(n => n.data.type === 'include'),
+    ...nodes.filter(n => n.data.type === 'define'),
+  ];
+
+  preprocessor.forEach(n => {
+    code += NODE_REGISTRY[n.data.type as string].toCode({
+      node: n,
+      nodes,
+      edges,
+      visited: new Set(),
+      indentLevel: 0,
+      traverse: () => '',
+      getFieldValue: (key: string) => readField(n, key)
+    });
+  });
+
+  if (preprocessor.length > 0) code += '\n';
+
   const functionDefs = nodes.filter(n => n.data.type === 'function-def');
   const visited = new Set<string>();
   const nodeById = new Map(nodes.map(n => [n.id, n] as const));
@@ -50,35 +52,8 @@ export function generateCCode(nodes: Node[], edges: Edge[]): string {
     const node = nodeById.get(currentId);
     if (!node) return '';
 
-    const data = node.data as any;
-    const registryItem = NODE_REGISTRY[data.type as string];
+    const registryItem = NODE_REGISTRY[node.data.type as string];
     let blockCode = '';
-
-    /**
-     * Retrieves the value of a field, either from the node data or from a connected expression node.
-     * `resolving` tracks the expression chain so cyclic field connections cannot recurse forever.
-     */
-    const getFieldValue = (targetNode: Node, fieldKey: string, resolving: Set<string> = new Set()): string => {
-      const fieldEdge = edges.find(e => e.target === targetNode.id && e.targetHandle === `field:${fieldKey}`);
-      if (fieldEdge && !resolving.has(fieldEdge.source)) {
-        const sourceNode = nodeById.get(fieldEdge.source);
-        const sourceRegistry = sourceNode ? NODE_REGISTRY[sourceNode.data.type as string] : null;
-
-        if (sourceNode && sourceRegistry?.toExpression) {
-          const chain = new Set(resolving).add(targetNode.id).add(sourceNode.id);
-          return sourceRegistry.toExpression({
-            node: sourceNode,
-            nodes,
-            edges,
-            visited: new Set(),
-            indentLevel: 0,
-            traverse: () => '',
-            getFieldValue: (key: string) => getFieldValue(sourceNode, key, chain)
-          });
-        }
-      }
-      return (targetNode.data as any)[fieldKey] || '';
-    };
 
     if (registryItem?.toCode) {
       blockCode += registryItem.toCode({
@@ -88,7 +63,7 @@ export function generateCCode(nodes: Node[], edges: Edge[]): string {
         visited,
         indentLevel,
         traverse,
-        getFieldValue: (key: string) => getFieldValue(node, key)
+        getFieldValue: (key: string) => readField(node, key)
       });
     }
 
@@ -101,7 +76,16 @@ export function generateCCode(nodes: Node[], edges: Edge[]): string {
     return blockCode;
   }
 
-  // Generate Function Bodies
+  // 2. Global declarations: everything chained from a Global Scope node is emitted at file
+  // scope, before any function, so both functions and main can use it.
+  let globalsCode = '';
+  nodes.filter(n => n.data.type === 'globals').forEach(globalsNode => {
+    const startEdge = edges.find(e => e.source === globalsNode.id && e.sourceHandle === 'next');
+    if (startEdge) globalsCode += traverse(startEdge.target, 0);
+  });
+  if (globalsCode) code += globalsCode + '\n';
+
+  // 3. Function definitions (excluding main)
   functionDefs.forEach(func => {
     const registryItem = NODE_REGISTRY['function-def'];
     if (registryItem) {
@@ -112,12 +96,12 @@ export function generateCCode(nodes: Node[], edges: Edge[]): string {
         visited,
         indentLevel: 0,
         traverse,
-        getFieldValue: (key: string) => (func.data as any)[key] || ''
+        getFieldValue: (key: string) => readField(func, key)
       });
     }
   });
 
-  // 3. Main Function Generation
+  // 4. Main Function Generation
   const mainNode = nodes.find(n => n.data.type === 'main');
   if (!mainNode) return "// Add a 'Main' node to start generating code.\n" + code;
 

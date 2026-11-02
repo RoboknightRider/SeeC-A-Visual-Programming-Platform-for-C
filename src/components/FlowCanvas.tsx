@@ -25,6 +25,22 @@ import { GRID_SIZE, layoutCodeLike, snapToGrid } from '../services/flowLayout';
 const initialNodes: Node[] = [];
 const initialEdges: Edge[] = [];
 
+// Only declarations are valid C at file scope, so a Global Scope chain accepts just these.
+const GLOBAL_SCOPE_TYPES = new Set(['variable', 'array', 'comment']);
+
+// Walks incoming edges up to the start of a chain and returns that node's type.
+const getChainRootType = (nodeId: string, nodes: Node[], edges: Edge[]) => {
+  const seen = new Set<string>();
+  let currentId = nodeId;
+  while (!seen.has(currentId)) {
+    seen.add(currentId);
+    const incoming = edges.find((edge) => edge.target === currentId);
+    if (!incoming) break;
+    currentId = incoming.source;
+  }
+  return (nodes.find((node) => node.id === currentId)?.data as unknown as NodeData | undefined)?.type;
+};
+
 export type FlowCanvasActions = {
   addNode: (type: string) => void;
   exportProject: () => string;
@@ -292,14 +308,13 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editin
         return targetRegistry.strictPrev.includes(sourceData.type);
       }
 
-      if (connection.targetHandle?.startsWith('field:')) {
-        const sourceRegistry = NODE_REGISTRY[sourceData.type];
-        return !!sourceRegistry?.toExpression;
+      if (getChainRootType(sourceNode.id, getNodes(), getEdges()) === 'globals') {
+        return GLOBAL_SCOPE_TYPES.has(targetData.type);
       }
 
       return true;
     },
-    [getNodes]
+    [getEdges, getNodes]
   );
 
   const addNode = useCallback((type: string, position?: { x: number, y: number }) => {
@@ -412,7 +427,8 @@ export const FlowCanvas = React.memo(({ onCodeChange, onNodesCountChange, editin
         try {
           const flow = JSON.parse(json);
           const newNodes = flow.nodes || [];
-          const newEdges = flow.edges || [];
+          // Older projects could wire nodes into input fields; that feature is gone, so drop those edges.
+          const newEdges = (flow.edges || []).filter((edge: Edge) => !edge.targetHandle?.startsWith('field:'));
           recordHistory();
           setNodes(newNodes);
           setEdges(newEdges);
